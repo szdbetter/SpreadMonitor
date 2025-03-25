@@ -209,7 +209,8 @@ const ApiSubMenu: React.FC = () => {
 
 const Sidebar: React.FC = () => {
   const location = useLocation();
-  const [activeStrategy, setActiveStrategy] = useState('1');
+  const [activeStrategy, setActiveStrategy] = useState<string | null>(null);
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [basicConfigOpen, setBasicConfigOpen] = useState(false);
   const [capabilityConfigOpen, setCapabilityConfigOpen] = useState(true);
   
@@ -267,6 +268,9 @@ const Sidebar: React.FC = () => {
             </NavItem>
             <NavItem to="/config/pairs">
               交易对配置
+            </NavItem>
+            <NavItem to="/config/alert">
+              告警配置
             </NavItem>
             
             {/* API管理子菜单 */}

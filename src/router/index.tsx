@@ -14,6 +14,7 @@ import ApiConfig from '../pages/ApiConfig';
 import DataCollectionConfig from '../pages/DataCollectionConfig';
 import DataProcessingConfig from '../pages/DataProcessingConfig';
 import AlertCapabilityConfig from '../pages/AlertCapabilityConfig';
+import AlertConfig from '../pages/AlertConfig';
 import Settings from '../pages/Settings';
 
 const AppRoutes: React.FC = () => {
@@ -31,6 +32,7 @@ const AppRoutes: React.FC = () => {
         <Route path="config/pairs" element={<PairConfig />} />
         <Route path="config/exchanges" element={<ExchangeConfig />} />
         <Route path="config/apis" element={<ApiConfig />} />
+        <Route path="config/alert" element={<AlertConfig />} />
         
         {/* 能力配置路由 */}
         <Route path="capability/data-collection" element={<DataCollectionConfig />} />
