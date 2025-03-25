@@ -961,7 +961,7 @@ const AlertConfig: React.FC = () => {
         
         try {
           // 调用服务器端API
-          const response = await fetch('http://localhost:3001/api/send-webhook', {
+          const response = await fetch('http://localhost:3000/api/send-webhook', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json'
@@ -987,7 +987,7 @@ const AlertConfig: React.FC = () => {
           }
         } catch (error: any) {
           logs.push(`发送请求失败: ${error.message}`);
-          logs.push(`请确保服务器已启动并运行在 http://localhost:3001`);
+          logs.push(`请确保服务器已启动并运行在 http://localhost:3000`);
           throw error;
         }
       }
