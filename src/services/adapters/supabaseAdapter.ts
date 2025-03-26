@@ -325,23 +325,13 @@ export class SupabaseAdapter<T extends { NO?: number }> implements IDataAdapter<
     // 特殊处理：如果有NO字段，转换为id
     if (record.NO !== undefined && record.NO !== null) {
       result.id = record.NO;
-    }
-    delete result.NO; // 确保删除NO字段
-    
-    // 特殊处理id字段: 如果id字段为null，删除它，让数据库自动生成
-    if (result.id === null || result.id === undefined) {
-      delete result.id;
+      delete result.NO; // 删除NO字段
     }
     
     // 特殊处理create_time字段 - 删除它或转换格式
     if (result.create_time !== undefined) {
       // 方案1：删除create_time字段，让数据库使用默认的created_at
       delete result.create_time;
-      
-      // 方案2(备选)：转换为ISO格式日期字符串
-      // if (typeof result.create_time === 'number') {
-      //   result.create_time = new Date(result.create_time).toISOString();
-      // }
     }
     
     // 特殊处理：针对不同表的特殊字段处理
@@ -352,8 +342,6 @@ export class SupabaseAdapter<T extends { NO?: number }> implements IDataAdapter<
         result.rpc_urls = JSON.stringify(record.rpcUrls);
         delete result.rpcUrls;
       }
-      
-      // 不需要单独处理testResults字段，已经被忽略列表处理了
     } else if (this.tableName === 'api_config') {
       // 处理api_config表中method字段的非空约束
       if (result.method === null || result.method === undefined) {
@@ -698,7 +686,6 @@ export class SupabaseAdapter<T extends { NO?: number }> implements IDataAdapter<
         // 先测试连接
         try {
           connectionLogs.push(`测试Supabase连接...`);
-          // 使用更可靠的连接测试方法
           const isConnected = await this.testConnection();
           if (!isConnected) {
             connectionLogs.push(`✗ Supabase连接测试失败`);
@@ -723,21 +710,52 @@ export class SupabaseAdapter<T extends { NO?: number }> implements IDataAdapter<
         
         // 执行更新
         connectionLogs.push(`执行更新操作...`);
-        const { data: updatedData, error } = await this.supabase
-          .from(this.tableName)
-          .update(dbItem)
-          .eq('id', id)
-          .select('*')
-          .single();
         
-        if (error) {
-          connectionLogs.push(`✗ 更新操作失败: ${error.message}`);
-          this.handleError(error, `update(ID=${id})`);
+        // 先检查记录是否存在
+        const checkResponse = await fetch(
+          `${SupabaseAdapter.getCurrentConfig().url}/rest/v1/${this.tableName}?id=eq.${id}&select=id`,
+          {
+            method: 'GET',
+            headers: {
+              'apikey': SupabaseAdapter.getCurrentConfig().key,
+              'Authorization': `Bearer ${SupabaseAdapter.getCurrentConfig().key}`
+            }
+          }
+        );
+        
+        const existingRecords = await checkResponse.json();
+        const recordExists = existingRecords && existingRecords.length > 0;
+        
+        // 根据记录是否存在选择使用 PATCH（更新）还是 POST（新增）
+        const method = recordExists ? 'PATCH' : 'POST';
+        connectionLogs.push(`记录${recordExists ? '已存在' : '不存在'}，使用 ${method} 方法`);
+        
+        // 发送请求
+        const response = await fetch(
+          `${SupabaseAdapter.getCurrentConfig().url}/rest/v1/${this.tableName}?id=eq.${id}`,
+          {
+            method,
+            headers: {
+              'apikey': SupabaseAdapter.getCurrentConfig().key,
+              'Authorization': `Bearer ${SupabaseAdapter.getCurrentConfig().key}`,
+              'Content-Type': 'application/json',
+              'Prefer': 'return=representation'
+            },
+            body: JSON.stringify(dbItem)
+          }
+        );
+
+        if (!response.ok) {
+          const error = await response.text();
+          connectionLogs.push(`✗ 更新操作失败: ${error}`);
+          throw new Error(`HTTP错误 ${response.status}: ${error}`);
         }
+
+        const updatedData = await response.json();
         
         connectionLogs.push(`✓ 更新操作成功`);
         // 返回更新后的对象
-        return updatedData ? this.fromDbFormat(updatedData) : data;
+        return updatedData ? this.fromDbFormat(updatedData[0]) : data;
       } catch (error) {
         lastError = error;
         const errorMsg = error instanceof Error ? error.message : String(error);

@@ -1317,7 +1317,7 @@ const DataCollectionConfig: React.FC = () => {
         }
         
         return response;
-    } else {
+      } else {
       // 处理HTTP类型的API
         logs.push(`[${new Date().toISOString()}] 调用HTTP数据获取函数...`);
       return await fetchHttpData(selectedApi, variables, logs);
@@ -1377,8 +1377,8 @@ const DataCollectionConfig: React.FC = () => {
       );
       
       logs.push('请求成功');
-      return {
-        success: true,
+        return {
+          success: true,
         message: '请求成功',
         data: response,
         logs
@@ -1395,38 +1395,101 @@ const DataCollectionConfig: React.FC = () => {
     }
   };
   
-  // 处理链上数据类型的API获取
+  // 添加网络 RPC URL 映射
+  const CHAIN_RPC_URLS: Record<string, string> = {
+    '1': 'https://eth.llamarpc.com',
+    '137': 'https://polygon-rpc.com',
+    '56': 'https://bsc-dataseed.binance.org',
+    '42161': 'https://arb1.arbitrum.io/rpc',
+    '10': 'https://mainnet.optimism.io',
+    '43114': 'https://api.avax.network/ext/bc/C/rpc'
+  };
+
+  // 修改 fetchChainData 函数
   const fetchChainData = async (apiConfig: ApiConfigModel, variables: Record<string, string>, logs: string[]): Promise<ApiResponse> => {
     try {
-      logs.push(`开始发送链上请求到: ${apiConfig.baseUrl}`);
+      logs.push(`[${new Date().toISOString()}] 开始处理链上请求...`);
+      
+      // 获取链 ID
+      const chainId = apiConfig.chainId?.toString() || '1';
+      logs.push(`[${new Date().toISOString()}] 链 ID: ${chainId}`);
+      
+      // 获取 RPC URL
+      let rpcUrl = CHAIN_RPC_URLS[chainId];
+      if (!rpcUrl) {
+        logs.push(`[${new Date().toISOString()}] 警告: 未找到链 ID ${chainId} 的默认 RPC URL，将使用用户配置的 URL`);
+        if (!apiConfig.baseUrl) {
+          throw new Error(`未找到链 ID ${chainId} 的 RPC URL，且未配置基础 URL`);
+        }
+        rpcUrl = apiConfig.baseUrl as string;
+      }
       
       // 替换变量
-      const processedUrl = replaceVariables(apiConfig.baseUrl, variables, logs);
-      logs.push(`处理后的URL: ${processedUrl}`);
+      if (variables && Object.keys(variables).length > 0) {
+        rpcUrl = replaceVariables(rpcUrl, variables, logs);
+      }
+      logs.push(`[${new Date().toISOString()}] 使用 RPC URL: ${rpcUrl}`);
       
-      // 创建provider
-      const provider = new ethers.providers.JsonRpcProvider(processedUrl);
+      // 创建 provider
+      const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+      logs.push(`[${new Date().toISOString()}] Provider 创建成功`);
       
       // 如果有合约地址，则创建合约实例
       if (apiConfig.contractAddress) {
+        logs.push(`[${new Date().toISOString()}] 合约地址: ${apiConfig.contractAddress}`);
+        
+        // 构建最小 ABI
+        const minABI = [
+          'function balanceOf(address) view returns (uint256)',
+          'function decimals() view returns (uint8)',
+          'function symbol() view returns (string)',
+          'function name() view returns (string)',
+          'function totalSupply() view returns (uint256)',
+          'function convertToAssets(uint256) view returns (uint256)',
+          'function convertToShares(uint256) view returns (uint256)',
+          'function previewDeposit(uint256) view returns (uint256)',
+          'function previewMint(uint256) view returns (uint256)',
+          'function previewWithdraw(uint256) view returns (uint256)',
+          'function previewRedeem(uint256) view returns (uint256)'
+        ];
+        
         const contract = new ethers.Contract(
           apiConfig.contractAddress,
-          [], // ABI - 需要根据实际情况提供
+          minABI,
           provider
         );
         
         // 如果有方法名，则调用合约方法
         if (apiConfig.methodName) {
-          const params = apiConfig.methodParams?.map(param => param.value) || [];
-          const result = await contract[apiConfig.methodName](...params);
+          logs.push(`[${new Date().toISOString()}] 调用合约方法: ${apiConfig.methodName}`);
           
-          logs.push('链上调用成功');
-          return {
-            success: true,
-            message: '链上调用成功',
-            data: result,
-            logs
-          };
+          // 处理方法参数
+          let params: any[] = [];
+          if (apiConfig.methodParams && apiConfig.methodParams.length > 0) {
+            params = apiConfig.methodParams.map(param => {
+              let value = param.value || ''; // 提供默认值
+              if (variables && Object.keys(variables).length > 0 && value) {
+                value = replaceVariables(value, variables, logs);
+              }
+              return value;
+            });
+            logs.push(`[${new Date().toISOString()}] 方法参数: ${JSON.stringify(params)}`);
+          }
+          
+          try {
+            const result = await contract[apiConfig.methodName](...params);
+            logs.push(`[${new Date().toISOString()}] 合约调用成功`);
+            
+            return {
+              success: true,
+              message: '链上调用成功',
+              data: result,
+              logs
+            };
+          } catch (error) {
+            logs.push(`[${new Date().toISOString()}] 合约调用失败: ${error instanceof Error ? error.message : String(error)}`);
+            throw error;
+          }
         }
       }
       
@@ -1434,7 +1497,7 @@ const DataCollectionConfig: React.FC = () => {
       const blockNumber = await provider.getBlockNumber();
       const block = await provider.getBlock(blockNumber);
       
-      logs.push('获取区块信息成功');
+      logs.push(`[${new Date().toISOString()}] 获取区块信息成功: ${blockNumber}`);
       return {
         success: true,
         message: '获取区块信息成功',
@@ -1443,7 +1506,7 @@ const DataCollectionConfig: React.FC = () => {
       };
       
     } catch (error) {
-      logs.push(`链上调用失败: ${error instanceof Error ? error.message : String(error)}`);
+      logs.push(`[${new Date().toISOString()}] 链上调用失败: ${error instanceof Error ? error.message : String(error)}`);
       return {
         success: false,
         message: `链上调用失败: ${error instanceof Error ? error.message : String(error)}`,
@@ -1997,34 +2060,20 @@ const DataCollectionConfig: React.FC = () => {
     const result: Record<string, any> = {};
     
     logs.push(`[${new Date().toISOString()}] 开始从响应中提取字段...`);
-    logs.push(`[${new Date().toISOString()}] 原始数据结构: ${JSON.stringify(Object.keys(data))}`);
+    logs.push(`[${new Date().toISOString()}] 原始数据类型: ${data?.constructor?.name || typeof data}`);
     
-    // 检查是否有重复的字段映射
-    const targetFields = fieldMappings.map(m => m.targetField);
-    const duplicateFields = targetFields.filter((field, index) => targetFields.indexOf(field) !== index);
-    if (duplicateFields.length > 0) {
-      logs.push(`[${new Date().toISOString()}] 警告: 发现重复的目标字段: ${duplicateFields.join(', ')}`);
+    // 如果数据是 BigNumber 类型，先转换为标准格式
+    if (data?.constructor?.name === 'BigNumber') {
+      data = {
+        type: 'BigNumber',
+        hex: data.toHexString(),
+        decimal: data.toString(),
+        formatted: formatNumber(data.toString())
+      };
+      logs.push(`[${new Date().toISOString()}] 转换 BigNumber 为标准格式: ${JSON.stringify(data)}`);
     }
     
-    // 添加一个函数来查找所有可能的路径
-    const findAllPaths = (obj: any, parentPath = ''): string[] => {
-      const paths: string[] = [];
-      
-      if (!obj || typeof obj !== 'object') {
-        return paths;
-      }
-      
-      Object.entries(obj).forEach(([key, value]) => {
-        const currentPath = parentPath ? `${parentPath}.${key}` : key;
-        paths.push(currentPath);
-        
-        if (value && typeof value === 'object') {
-          paths.push(...findAllPaths(value, currentPath));
-        }
-      });
-      
-      return paths;
-    };
+    logs.push(`[${new Date().toISOString()}] 处理后的数据结构: ${JSON.stringify(Object.keys(data))}`);
     
     fieldMappings.forEach(mapping => {
       if (!mapping.sourceField || !mapping.targetField) {
@@ -2054,21 +2103,8 @@ const DataCollectionConfig: React.FC = () => {
             const availableKeys: string[] = Object.keys(value);
             logs.push(`[${new Date().toISOString()}] 当前层级 [${key}] 可用的键: ${availableKeys.join(', ')}`);
             
-            // 检查键是否存在
             if (!availableKeys.includes(key)) {
               logs.push(`[${new Date().toISOString()}] 错误: 键 ${key} 在当前层级不存在`);
-              logs.push(`[${new Date().toISOString()}] 当前层级的完整数据: ${JSON.stringify(value)}`);
-              
-              // 尝试模糊匹配
-              const similarKeys = availableKeys.filter(k => 
-                k.toLowerCase().includes(key.toLowerCase()) || 
-                key.toLowerCase().includes(k.toLowerCase())
-              );
-              
-              if (similarKeys.length > 0) {
-                logs.push(`[${new Date().toISOString()}] 找到相似的键: ${similarKeys.join(', ')}`);
-              }
-              
               value = undefined;
               break;
             }
@@ -2082,23 +2118,9 @@ const DataCollectionConfig: React.FC = () => {
         if (value !== undefined && value !== null) {
           result[mapping.targetField] = value;
           logs.push(`[${new Date().toISOString()}] 成功提取字段 ${mapping.sourceField} 到 ${mapping.targetField}: ${JSON.stringify(value)}`);
-        } else {
+          } else {
           logs.push(`[${new Date().toISOString()}] 警告: 路径 ${mapping.sourceField} 的值为空`);
           result[mapping.targetField] = null;
-          
-          // 尝试在整个数据结构中查找匹配的字段
-          const allPaths = findAllPaths(data);
-          const matchingPaths = allPaths.filter(path => 
-            path.toLowerCase().includes(mapping.targetField.toLowerCase())
-          );
-          
-          if (matchingPaths.length > 0) {
-            logs.push(`[${new Date().toISOString()}] 建议的路径:`);
-            matchingPaths.forEach(path => {
-              const pathValue = getNestedValue(data, path);
-              logs.push(`[${new Date().toISOString()}] - ${path} = ${JSON.stringify(pathValue)}`);
-            });
-          }
           }
         } catch (error) {
         logs.push(`[${new Date().toISOString()}] 错误: 提取字段 ${mapping.sourceField} 失败: ${error instanceof Error ? error.message : String(error)}`);
@@ -2581,31 +2603,38 @@ const DataCollectionConfig: React.FC = () => {
                 API 响应结果: {apiResponse.success ? '成功' : '失败'}
               </ApiResponseTitle>
               
-              {/* 添加数据结构树显示 */}
+              {/* 修改数据结构树显示 */}
               <div style={{ marginBottom: '15px' }}>
                 <strong>数据结构树:</strong>
                 <ApiResponseContent>
                   {(() => {
-                    const printTree = (obj: any, level = 0): string[] => {
-                      if (!obj || typeof obj !== 'object') return [];
+                    const printTree = (obj: any, level = 0, path = ''): string[] => {
+                      if (!obj) return [`${' '.repeat(level * 2)}${path}: ${obj === null ? 'null' : 'undefined'}`];
+                      
+                      if (typeof obj !== 'object') {
+                        return [`${' '.repeat(level * 2)}${path}: ${obj} (${typeof obj})`];
+                      }
                       
                       return Object.entries(obj).flatMap(([key, value]) => {
-                        const indent = '  '.repeat(level);
-                        const valueType = typeof value;
-                        const isObject = value && typeof value === 'object';
+                        const currentPath = path ? `${path}.${key}` : key;
+                        const indent = ' '.repeat(level * 2);
                         
-                        if (isObject) {
+                        if (value && typeof value === 'object') {
+                          const typeInfo = Array.isArray(value) ? 'Array' : 
+                            value.constructor ? value.constructor.name : 'Object';
+                          
                           return [
-                            `${indent}${key} (${Array.isArray(value) ? 'Array' : 'Object'}):`,
-                            ...printTree(value, level + 1)
+                            `${indent}${currentPath} (${typeInfo}):`,
+                            ...printTree(value, level + 1, currentPath)
                           ];
-                        } else {
-                          const displayValue = value === null ? 'null' : 
-                            value === undefined ? 'undefined' : 
-                            valueType === 'string' ? `"${value}"` : 
-                            String(value);
-                          return [`${indent}${key}: ${displayValue} (${valueType})`];
                         }
+                        
+                        const displayValue = value === null ? 'null' : 
+                          value === undefined ? 'undefined' : 
+                          typeof value === 'string' ? `"${value}"` : 
+                          String(value);
+                          
+                        return [`${indent}${currentPath}: ${displayValue} (${typeof value})`];
                       });
                     };
                     
@@ -2614,16 +2643,40 @@ const DataCollectionConfig: React.FC = () => {
                 </ApiResponseContent>
               </div>
               
-              {/* 其他响应内容保持不变 */}
-              <div style={{ marginBottom: '15px' }}>
-                <strong>状态:</strong> {apiResponse.success ? '成功' : '失败'}
-              </div>
-              
+              {/* 修改响应数据显示 */}
               {apiResponse.data && (
                 <div style={{ marginBottom: '15px' }}>
                   <strong>响应数据:</strong>
                   <ApiResponseContent>
-                    {JSON.stringify(apiResponse.data, null, 2)}
+                    {(() => {
+                      const formatValue = (value: any): string => {
+                        if (value === null) return 'null';
+                        if (value === undefined) return 'undefined';
+                        if (typeof value === 'object') {
+                          if (value.constructor && value.constructor.name === 'BigNumber') {
+                            // 对于 BigNumber 类型，显示更多信息
+                            return JSON.stringify({
+                              type: 'BigNumber',
+                              hex: value.toHexString(),
+                              decimal: value.toString(),
+                              formatted: formatNumber(value.toString())
+                            }, null, 2);
+                          }
+                          return JSON.stringify(value, (key, val) => {
+                            if (val && typeof val === 'object' && val.constructor) {
+                              return {
+                                type: val.constructor.name,
+                                ...val
+                              };
+                            }
+                            return val;
+                          }, 2);
+                        }
+                        return String(value);
+                      };
+                      
+                      return formatValue(apiResponse.data);
+                    })()}
                   </ApiResponseContent>
                 </div>
               )}
