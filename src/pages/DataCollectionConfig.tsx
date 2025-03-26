@@ -2,14 +2,14 @@ import React, { useState, useEffect, useRef } from 'react';
 import styled from 'styled-components';
 import { Database, DataCollectionConfigModel } from '../utils/database';
 import { apiConfigAccess, ApiConfigModel, chainConfigAccess, ChainConfigModel } from '../services/database';
-import { sendRequest, isTamperMonkeyEnvironment } from '../utils/tampermonkey';
-import { ethers } from 'ethers'; // 导入ethers.js库
+import { ethers } from 'ethers';
 import { DataFactory, StorageType } from '../services/adapters/dataFactory';
 import { getCurrentStorageType, addStorageTypeListener, setStorageType } from '../services/adapters/storageManager';
 import { IDataAdapter } from '../services/adapters/dataAdapter';
 import { SupabaseAdapter } from '../services/adapters/supabaseAdapter';
 import { testConnection, diagnoseNetworkIssues } from '../services/adapters/networkUtils';
 import { testSupabaseConnection } from '../services/adapters/migration';
+import { sendRequest } from '../utils/tampermonkey';
 
 // 添加类型扩展
 declare global {
@@ -1334,93 +1334,62 @@ const DataCollectionConfig: React.FC = () => {
     }
   };
   
-  // 处理HTTP类型的API数据获取
+  // 修改 fetchHttpData 函数
   const fetchHttpData = async (apiConfig: ApiConfigModel, variables: Record<string, string>, logs: string[]): Promise<ApiResponse> => {
-    logs.push(`[${new Date().toISOString()}] 准备发送HTTP请求到 ${apiConfig.baseUrl}`);
-    
     try {
+      logs.push(`开始发送HTTP请求到: ${apiConfig.baseUrl}`);
+      
       // 替换URL中的变量
-      let url = apiConfig.baseUrl || '';
-      Object.entries(variables).forEach(([key, value]) => {
-        url = url.replace(`{${key}}`, encodeURIComponent(value));
-      });
+      const processedUrl = replaceVariables(apiConfig.baseUrl, variables, logs);
+      logs.push(`处理后的URL: ${processedUrl}`);
       
-      logs.push(`[${new Date().toISOString()}] 处理后的URL: ${url}`);
-      
-      // 准备请求头
+      // 处理请求头
       const headers: Record<string, string> = {
-        'Content-Type': 'application/json'  // 添加 Content-Type 头部
+        'Content-Type': 'application/json'
       };
       
       if (apiConfig.apiKey) {
         headers['X-API-Key'] = apiConfig.apiKey;
-        logs.push(`[${new Date().toISOString()}] 已添加API密钥`);
       }
-      
+
       if (apiConfig.apiSecret) {
         headers['Authorization'] = `Bearer ${apiConfig.apiSecret}`;
-        logs.push(`[${new Date().toISOString()}] 已添加认证信息`);
       }
       
       // 处理请求体
-      let body: string | undefined = undefined;
-      
-      if (apiConfig.method === 'POST') {
-        body = apiConfig.payload || '';
-        
-      // 替换变量
-        if (body) {
-          Object.entries(variables).forEach(([key, value]) => {
-            body = body!.replace(new RegExp(`\\(${key}\\)`, 'g'), value);
-          });
-          
-          // 如果是 COW.fi API，特殊处理 payload
-          if (url.includes('api.cow.fi')) {
-            body = processCowApiPayload(body, variables, logs);
-            logs.push(`[${new Date().toISOString()}] 处理后的请求体: ${body}`);
-          }
+      let processedBody = null;
+      if (apiConfig.payload) {
+        if (processedUrl.includes('api.cow.fi')) {
+          processedBody = processCowApiPayload(apiConfig.payload, variables, logs);
+        } else {
+          processedBody = replaceVariables(apiConfig.payload, variables, logs);
         }
+        logs.push(`处理后的请求体: ${processedBody}`);
       }
       
-      // 发送请求
-      logs.push(`[${new Date().toISOString()}] 发送${apiConfig.method || 'GET'}请求...`);
-      logs.push(`[${new Date().toISOString()}] 请求头: ${JSON.stringify(headers)}`);
-      if (body) {
-        logs.push(`[${new Date().toISOString()}] 请求体: ${body}`);
-      }
-      
-      const response = await fetch(url, {
-        method: apiConfig.method || 'GET',
+      // 使用sendRequest发送请求
+      const response = await sendRequest(
+        processedUrl,
+        apiConfig.method,
         headers,
-        body: body
-      });
+        processedBody,
+        30000
+      );
       
-      if (!response.ok) {
-        const errorText = await response.text();
-        logs.push(`[${new Date().toISOString()}] 请求失败: HTTP ${response.status} - ${response.statusText}`);
-        logs.push(`[${new Date().toISOString()}] 错误详情: ${errorText}`);
-        return {
-          success: false,
-          message: `请求失败: HTTP ${response.status} - ${response.statusText}\n${errorText}`,
-          logs
-        };
-      }
-      
-      // 解析响应
-      const data = await response.json();
-      logs.push(`[${new Date().toISOString()}] 请求成功，正在处理数据...`);
-      
+      logs.push('请求成功');
       return {
         success: true,
-        message: '数据获取成功',
-        data,
+        message: '请求成功',
+        data: response,
         logs
       };
+      
     } catch (error) {
-      logs.push(`[${new Date().toISOString()}] 错误: ${error instanceof Error ? error.message : String(error)}`);
+      logs.push(`请求失败: ${error instanceof Error ? error.message : String(error)}`);
       return {
         success: false,
-        message: `HTTP请求失败: ${error instanceof Error ? error.message : String(error)}`,
+        message: `请求失败: ${error instanceof Error ? error.message : String(error)}`,
+        error: error instanceof Error ? error.message : String(error),
         logs
       };
     }
@@ -1428,315 +1397,57 @@ const DataCollectionConfig: React.FC = () => {
   
   // 处理链上数据类型的API获取
   const fetchChainData = async (apiConfig: ApiConfigModel, variables: Record<string, string>, logs: string[]): Promise<ApiResponse> => {
-    logs.push(`[${new Date().toISOString()}] 使用区块链API查询数据`);
-    
     try {
-      // 确保使用相同的存储类型
-      const chainAdapter = await DataFactory.getAdapterAsync<ChainConfigModel>('ChainConfig', storageType);
-      logs.push(`[${new Date().toISOString()}] 已创建链配置适配器，存储类型: ${storageType === StorageType.Supabase ? 'Supabase' : 'IndexedDB'}`);
+      logs.push(`开始发送链上请求到: ${apiConfig.baseUrl}`);
       
-      // 解析链ID
-      let chainId: number = 0;
+      // 替换变量
+      const processedUrl = replaceVariables(apiConfig.baseUrl, variables, logs);
+      logs.push(`处理后的URL: ${processedUrl}`);
       
-      if (variables.chainId) {
-        chainId = Number(variables.chainId);
-        logs.push(`[${new Date().toISOString()}] 从变量中获取链ID: ${chainId}`);
-      } else if (apiConfig.chainId) {
-        chainId = Number(apiConfig.chainId);
-        logs.push(`[${new Date().toISOString()}] 从API配置中获取链ID: ${chainId}`);
-      }
+      // 创建provider
+      const provider = new ethers.providers.JsonRpcProvider(processedUrl);
       
-      if (!chainId) {
-        chainId = 1;
-        logs.push(`[${new Date().toISOString()}] 未找到链ID，使用默认链ID: ${chainId} (ETH)`);
-      }
-      
-      logs.push(`[${new Date().toISOString()}] 最终使用的链ID: ${chainId}`);
-      
-      // 获取所有链配置
-      const allChains = await chainAdapter.getAll();
-      logs.push(`[${new Date().toISOString()}] 系统中共有 ${allChains.length} 个链配置`);
-      
-      if (allChains.length > 0) {
-        logs.push(`[${new Date().toISOString()}] 可用的链配置详情:`);
-        allChains.forEach(chain => {
-          logs.push(`[${new Date().toISOString()}] - 链ID: ${chain.chainId}, 名称: ${chain.name}`);
-          // 解析 RPC URLs
-          let rpcUrls: string[] = [];
-          try {
-            if (typeof chain.rpcUrls === 'string') {
-              rpcUrls = JSON.parse(chain.rpcUrls);
-            } else if (Array.isArray(chain.rpcUrls)) {
-              rpcUrls = chain.rpcUrls;
-            }
-            logs.push(`[${new Date().toISOString()}] - RPC URLs: ${JSON.stringify(rpcUrls)}`);
-    } catch (error) {
-            logs.push(`[${new Date().toISOString()}] - 警告: RPC URLs 解析失败: ${error instanceof Error ? error.message : String(error)}`);
-          }
-        });
-      } else {
-        logs.push(`[${new Date().toISOString()}] 警告: 系统中没有配置任何链`);
-      }
-      
-      // 查找链配置
-      let chainConfig = allChains.find(chain => chain.chainId === chainId);
-      
-      if (!chainConfig) {
-        logs.push(`[${new Date().toISOString()}] 未找到chainId为 ${chainId} 的链配置，尝试查找替代链`);
-        
-        const alternativeChain = allChains.find(c => 
-          (chainId === 1 && (c.name.toLowerCase().includes('ethereum') || c.name.toLowerCase().includes('eth'))) ||
-          (chainId === 56 && c.name.toLowerCase().includes('bsc')) ||
-          (chainId === 42161 && c.name.toLowerCase().includes('arb'))
+      // 如果有合约地址，则创建合约实例
+      if (apiConfig.contractAddress) {
+        const contract = new ethers.Contract(
+          apiConfig.contractAddress,
+          [], // ABI - 需要根据实际情况提供
+          provider
         );
         
-        if (alternativeChain) {
-          logs.push(`[${new Date().toISOString()}] 找到可能的替代链: ${alternativeChain.name} (chainId: ${alternativeChain.chainId})`);
-          chainConfig = alternativeChain;
-        } else {
-          const errorMsg = `未找到chainId为 ${chainId} 的链配置。请检查配置或创建该链的配置。`;
-          logs.push(`[${new Date().toISOString()}] 错误: ${errorMsg}`);
+        // 如果有方法名，则调用合约方法
+        if (apiConfig.methodName) {
+          const params = apiConfig.methodParams?.map(param => param.value) || [];
+          const result = await contract[apiConfig.methodName](...params);
+          
+          logs.push('链上调用成功');
           return {
-            success: false,
-            message: errorMsg,
+            success: true,
+            message: '链上调用成功',
+            data: result,
             logs
           };
         }
       }
       
-      // 解析 RPC URLs
-      let rpcUrls: string[] = [];
-      try {
-        if (typeof chainConfig.rpcUrls === 'string') {
-          rpcUrls = JSON.parse(chainConfig.rpcUrls);
-        } else if (Array.isArray(chainConfig.rpcUrls)) {
-          rpcUrls = chainConfig.rpcUrls;
-        }
-      } catch (error) {
-        logs.push(`[${new Date().toISOString()}] 警告: RPC URLs 解析失败: ${error instanceof Error ? error.message : String(error)}`);
-      }
+      // 如果没有合约地址或方法名，则获取区块信息
+      const blockNumber = await provider.getBlockNumber();
+      const block = await provider.getBlock(blockNumber);
       
-      // 验证链配置
-      if (!rpcUrls || rpcUrls.length === 0) {
-        const errorMsg = `链 ${chainConfig.name} (chainId: ${chainConfig.chainId}) 没有配置RPC URL`;
-        logs.push(`[${new Date().toISOString()}] 错误: ${errorMsg}`);
-        return {
-          success: false,
-          message: errorMsg,
-          logs
-        };
-      }
-      
-      logs.push(`[${new Date().toISOString()}] 使用链配置: ${chainConfig.name} (chainId: ${chainConfig.chainId})`);
-      logs.push(`[${new Date().toISOString()}] 可用的RPC URLs: ${JSON.stringify(rpcUrls)}`);
-      
-      // 尝试所有可用的RPC URL
-      let provider = null;
-      let connectedRpcUrl = '';
-      
-      for (const rpcUrl of rpcUrls) {
-        try {
-          logs.push(`[${new Date().toISOString()}] 尝试连接RPC URL: ${rpcUrl}`);
-          provider = new ethers.providers.JsonRpcProvider(rpcUrl);
-          
-          // 测试连接
-          const network = await provider.getNetwork();
-          const blockNumber = await provider.getBlockNumber();
-          
-          logs.push(`[${new Date().toISOString()}] 成功连接到网络:`);
-          logs.push(`[${new Date().toISOString()}] - 网络名称: ${network.name}`);
-          logs.push(`[${new Date().toISOString()}] - 链ID: ${network.chainId}`);
-          logs.push(`[${new Date().toISOString()}] - 当前区块: ${blockNumber}`);
-          
-          connectedRpcUrl = rpcUrl;
-          break;
-        } catch (error) {
-          logs.push(`[${new Date().toISOString()}] RPC URL ${rpcUrl} 连接失败: ${error instanceof Error ? error.message : String(error)}`);
-          continue;
-        }
-      }
-      
-      if (!provider || !connectedRpcUrl) {
-        const errorMsg = `无法连接到任何可用的RPC节点，请检查网络连接或更新RPC配置`;
-        logs.push(`[${new Date().toISOString()}] 错误: ${errorMsg}`);
-        return {
-          success: false,
-          message: errorMsg,
-          logs
-        };
-      }
-      
-      // 验证合约地址
-      if (!apiConfig.contractAddress) {
-        const errorMsg = '缺少合约地址';
-        logs.push(`[${new Date().toISOString()}] 错误: ${errorMsg}`);
-        return {
-          success: false,
-          message: errorMsg,
-          logs
-        };
-      }
-      
-      if (!ethers.utils.isAddress(apiConfig.contractAddress)) {
-        const errorMsg = `合约地址无效: ${apiConfig.contractAddress}`;
-        logs.push(`[${new Date().toISOString()}] 错误: ${errorMsg}`);
-        return {
-          success: false,
-          message: errorMsg,
-          logs
-        };
-      }
-      
-      // 检查合约代码
-      const code = await provider.getCode(apiConfig.contractAddress);
-      if (code === '0x') {
-        const errorMsg = `地址不是合约: ${apiConfig.contractAddress}`;
-        logs.push(`[${new Date().toISOString()}] 错误: ${errorMsg}`);
-        return {
-          success: false,
-          message: errorMsg,
-          logs
-        };
-      }
-      
-      logs.push(`[${new Date().toISOString()}] 合约验证成功，代码大小: ${code.length} 字节`);
-      
-      // 验证方法名称
-      if (!apiConfig.methodName) {
-        const errorMsg = '缺少合约方法名称';
-        logs.push(`[${new Date().toISOString()}] 错误: ${errorMsg}`);
-        return {
-          success: false,
-          message: errorMsg,
-          logs
-        };
-      }
-
-      // 构建合约ABI接口
-      logs.push(`[${new Date().toISOString()}] 准备调用合约方法: ${apiConfig.methodName}`);
-      
-      // 根据apiConfig.methodName和methodParams构建ABI接口
-      // 这里假设已经存储了methodName的ABI定义
-      let abiFragment = '';
-      const methodName = apiConfig.methodName; // 将方法名存储在变量中
-      
-      if (methodName === 'balanceOf') {
-        abiFragment = 'function balanceOf(address owner) view returns (uint256)';
-      } else if (methodName === 'totalSupply') {
-        abiFragment = 'function totalSupply() view returns (uint256)';
-      } else if (methodName === 'decimals') {
-        abiFragment = 'function decimals() view returns (uint8)';
-      } else if (methodName === 'symbol') {
-        abiFragment = 'function symbol() view returns (string)';
-      } else if (methodName === 'name') {
-        abiFragment = 'function name() view returns (string)';
-      } else if (methodName === 'convertToAssets') {
-        abiFragment = 'function convertToAssets(uint256 shares) view returns (uint256)';
-        } else {
-        // 对于其他方法，尝试基于方法名和参数构建一个通用接口
-        abiFragment = `function ${methodName}(`;
-        
-        // 添加参数类型
-        if (apiConfig.methodParams && apiConfig.methodParams.length > 0) {
-          abiFragment += apiConfig.methodParams.map(param => `${param.type} ${param.name}`).join(', ');
-        }
-        
-        abiFragment += ') view returns (uint256)';
-      }
-      
-      logs.push(`[${new Date().toISOString()}] 使用ABI接口: ${abiFragment}`);
-      
-      // 创建合约接口
-      const contractInterface = new ethers.utils.Interface([abiFragment]);
-      const contract = new ethers.Contract(apiConfig.contractAddress, contractInterface, provider);
-      
-      // 准备方法参数
-      const methodParams: any[] = [];
-      
-      if (apiConfig.methodParams && apiConfig.methodParams.length > 0) {
-        for (const param of apiConfig.methodParams) {
-          // 检查变量中是否有该参数的值
-          let paramValue = param.value;
-          
-          if (variables[param.name]) {
-            paramValue = variables[param.name];
-            logs.push(`[${new Date().toISOString()}] 使用变量值 "${param.name}": ${paramValue}`);
-          }
-          
-          if (!paramValue) {
-            logs.push(`[${new Date().toISOString()}] 警告: 参数 "${param.name}" 没有值`);
-            continue;
-          }
-          
-          // 根据参数类型处理值
-          if (param.type === 'address') {
-            methodParams.push(paramValue); // 地址类型直接添加
-          } else if (param.type.includes('int')) {
-            methodParams.push(ethers.BigNumber.from(paramValue)); // 整数类型转换为BigNumber
-          } else if (param.type === 'bool') {
-            methodParams.push(paramValue === 'true'); // 布尔类型转换
-          } else {
-            methodParams.push(paramValue); // 其他类型直接添加
-          }
-        }
-      }
-      
-      logs.push(`[${new Date().toISOString()}] 调用合约方法 ${methodName} 参数: ${JSON.stringify(methodParams)}`);
-      
-      // 调用合约方法
-      try {
-        // 动态调用合约方法
-        let result;
-        if (methodParams.length > 0) {
-          result = await contract[methodName](...methodParams);
-        } else {
-          result = await contract[methodName]();
-        }
-        
-        logs.push(`[${new Date().toISOString()}] 合约方法调用成功`);
-        
-        // 处理结果 - 对于BigNumber类型，转换为字符串
-        let processedResult: any;
-        
-        if (ethers.BigNumber.isBigNumber(result)) {
-          processedResult = result.toString();
-          logs.push(`[${new Date().toISOString()}] BigNumber结果转换为字符串: ${processedResult}`);
-      } else {
-          processedResult = result;
-        }
-        
-        // 构建响应数据
-        const responseData = {
-          chainId: chainConfig.chainId,
-          chainName: chainConfig.name,
-          contractAddress: apiConfig.contractAddress,
-          method: apiConfig.methodName,
-          params: methodParams,
-          timestamp: new Date().toISOString(),
-          result: processedResult
-        };
-        
-        logs.push(`[${new Date().toISOString()}] 链上数据获取成功`);
-      
+      logs.push('获取区块信息成功');
       return {
         success: true,
-          message: '链上数据获取成功',
-        data: responseData,
-          logs
+        message: '获取区块信息成功',
+        data: block,
+        logs
       };
+      
     } catch (error) {
-        logs.push(`[${new Date().toISOString()}] 合约方法调用失败: ${error instanceof Error ? error.message : String(error)}`);
-        return {
-          success: false,
-          message: `合约方法调用失败: ${error instanceof Error ? error.message : String(error)}`,
-          logs
-        };
-      }
-    } catch (error) {
-      logs.push(`[${new Date().toISOString()}] 错误: ${error instanceof Error ? error.message : String(error)}`);
+      logs.push(`链上调用失败: ${error instanceof Error ? error.message : String(error)}`);
       return {
         success: false,
-        message: `链上数据获取失败: ${error instanceof Error ? error.message : String(error)}`,
+        message: `链上调用失败: ${error instanceof Error ? error.message : String(error)}`,
+        error: error instanceof Error ? error.message : String(error),
         logs
       };
     }
