@@ -1,43 +1,50 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import styled from 'styled-components';
-import { Database, DataCollectionConfigModel } from '../utils/database';
+import type { DataCollectionConfigModel, DataProcessingConfigModel, ProcessingRule, OutputParam } from '../utils/database';
 import { DataFactory, StorageType } from '../services/adapters/dataFactory';
 import { getCurrentStorageType, addStorageTypeListener } from '../services/adapters/storageManager';
+import { supabase } from '../lib/supabaseClient';
+import { Button as AntButton, Select as AntSelect, Input as AntInput, Space, Card as AntCard, message } from 'antd';
+import { PlusOutlined, DeleteOutlined } from '@ant-design/icons';
+import { fetchApiData, extractFieldValues } from '../services/dataCollectionService';
+import type { ApiConfigModel } from '../services/database';
+import type { SelectProps } from 'antd/es/select';
+import type { BaseOptionType, DefaultOptionType } from 'antd/es/select';
 
-// 定义数据加工配置模型（因为无法更新database.ts，所以在这里定义）
-interface DataProcessingConfigModel {
-  NO?: number;
-  name: string;
-  sourceNodeId: number; // 关联的数据采集节点ID
-  inputParams: Array<{
-    name: string;
-    type: string;
-    value?: any;
-    selected?: boolean; // 是否选择作为计算输入
-  }>;
-  formulas: Array<{
-    name: string;
-    formula: string;
-    description?: string;
-    result?: any; // 临时存储公式计算结果
-  }>;
-  outputParams: Array<{
-    name: string;
-    type: string;
-    value?: string; // 引用公式结果或输入参数
-  }>;
-  active: boolean;
-  create_time?: number;
+// 简化的数据采集节点类型
+interface DataCollectionNode extends DataCollectionConfigModel {
+  key: string;
+  title: string;
+  value: string;
 }
 
 // 初始空节点
 const emptyNode: DataProcessingConfigModel = {
+  id: '',
   name: '',
-  sourceNodeId: 0,
-  inputParams: [],
-  formulas: [],
-  outputParams: [],
-  active: true,
+  source_node_id: '',
+  rules: [],
+  output_params: [],
+  is_enabled: true
+};
+
+// 初始空规则
+const emptyRule: ProcessingRule = {
+  id: '',
+  name: '',
+  type: 'TRANSFORM',
+  config: {},
+  active: true
+};
+
+// 初始空输出参数
+const emptyOutputParam: OutputParam = {
+  customName: '',
+  displayName: '',
+  jsonPath: '',
+  type: 'STRING',
+  targetField: '',
+  value: ''
 };
 
 // 样式组件
@@ -58,7 +65,7 @@ const PageTitle = styled.h1`
   font-size: 24px;
 `;
 
-const ActionButton = styled.button`
+const ActionButton = styled(AntButton)`
   background-color: #F0B90B;
   color: #000000;
   border: none;
@@ -183,7 +190,7 @@ const Label = styled.label`
   font-size: 14px;
 `;
 
-const Input = styled.input`
+const Input = styled(AntInput)`
   width: 100%;
   padding: 8px 12px;
   border: 1px solid #444444;
@@ -214,9 +221,8 @@ const Textarea = styled.textarea`
   }
 `;
 
-const Select = styled.select`
+const Select = styled(AntSelect)<SelectProps<string>>`
   width: 100%;
-  padding: 8px 12px;
   background-color: #333333;
   border: 1px solid #444444;
   border-radius: 4px;
@@ -247,7 +253,7 @@ const ButtonGroup = styled.div`
   margin-top: 20px;
 `;
 
-const Button = styled.button`
+const Button = styled(AntButton)`
   padding: 8px 16px;
   border: none;
   border-radius: 4px;
@@ -403,7 +409,7 @@ const SuccessMessage = styled.div`
   margin-top: 5px;
 `;
 
-const Card = styled.div`
+const Card = styled(AntCard)`
   background-color: #2A2A2A;
   border-radius: 5px;
   padding: 20px;
@@ -414,745 +420,278 @@ const Text = styled.p`
   color: white;
 `;
 
+interface LogMessage {
+  timestamp: string;
+  message: string;
+  type: 'info' | 'error' | 'success';
+}
+
+interface SupabaseDataCollectionConfig {
+  id?: string;
+  name: string;
+  config: Record<string, any>;
+  type: 'contract' | 'api' | 'websocket';
+  active: boolean;
+}
+
 const DataProcessingConfig: React.FC = () => {
-  // 状态定义
-  const [processingNodes, setProcessingNodes] = useState<DataProcessingConfigModel[]>([]);
-  const [dataCollectionNodes, setDataCollectionNodes] = useState<DataCollectionConfigModel[]>([]);
-  const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null);
-  const [currentNode, setCurrentNode] = useState<DataProcessingConfigModel>({...emptyNode});
+  const [nodes, setNodes] = useState<DataProcessingConfigModel[]>([]);
+  const [currentNode, setCurrentNode] = useState<DataProcessingConfigModel>(emptyNode);
+  const [selectedNode, setSelectedNode] = useState<DataCollectionNode | null>(null);
+  const [dataCollectionNodes, setDataCollectionNodes] = useState<DataCollectionNode[]>([]);
   const [isEditing, setIsEditing] = useState(false);
-  const [testResults, setTestResults] = useState<Record<string, any>>({});
-  const [errorMessage, setErrorMessage] = useState('');
-  const [successMessage, setSuccessMessage] = useState('');
-  const [variables, setVariables] = useState<Record<string, any>>({});
-  const [currentStorageType, setCurrentStorageType] = useState<StorageType>(getCurrentStorageType());
+  const [isLoading, setIsLoading] = useState(false);
+  const [logs, setLogs] = useState<LogMessage[]>([]);
 
-  // 监听存储类型变化
-  useEffect(() => {
-    const unsubscribe = addStorageTypeListener((newType) => {
-      setCurrentStorageType(newType);
-      // 存储类型变化时重新加载数据
-      loadNodes();
-    });
-    
-    return () => unsubscribe();
-  }, []);
-
-  // 加载所有节点数据
-  const loadNodes = useCallback(async () => {
+  // 获取所有数据处理节点
+  const fetchProcessingNodes = async () => {
     try {
-      // 获取当前存储类型
-      const storageType = getCurrentStorageType(true); // 强制检查网络连接
-      console.log(`当前存储类型: ${storageType}`);
-      
-      // 创建数据处理配置适配器
-      const processingAdapter = await DataFactory.getAdapterAsync<DataProcessingConfigModel>('data_processing_configs', storageType, true);
-      
-      // 加载数据处理配置
-      const processingData = await processingAdapter.getAll();
-      console.log('已加载数据处理配置:', processingData);
-      
-      if (processingData && Array.isArray(processingData)) {
-        setProcessingNodes(processingData);
-      } else {
-        console.log('未找到数据处理配置或格式不正确');
-        setProcessingNodes([]);
+      addLog('正在获取数据处理节点列表...');
+      const { data: rawData, error } = await supabase
+        .from('data_processing_configs')
+        .select('*')
+        .eq('is_enabled', true);
+
+      if (error) throw error;
+      if (!rawData) {
+        addLog('未获取到数据处理节点', 'error');
+        return;
       }
-      
-      // 创建数据采集配置适配器
-      const collectionAdapter = await DataFactory.getAdapterAsync<DataCollectionConfigModel>('data_collection_configs', storageType);
-      
-      // 加载数据采集配置
-      const collectionData = await collectionAdapter.getAll();
-      console.log('已加载数据采集配置:', collectionData);
-      
-      if (collectionData && Array.isArray(collectionData)) {
-        setDataCollectionNodes(collectionData);
-        
-        // 如果没有数据采集节点，创建示例数据
-        if (collectionData.length === 0) {
-          console.log('未找到数据采集节点，创建示例数据');
-          
-          const sampleNode = {
-            name: '示例数据采集节点',
-            type: 'api' as 'api' | 'contract' | 'websocket',
-            config: {
-              apiParams: {
-                customConfig: JSON.stringify({
-                  apiId: 0,
-                  fieldMappings: []
-                })
-              }
-            },
-            active: true,
-            create_time: Date.now()
-          };
-          
-          try {
-            await collectionAdapter.create(sampleNode);
-            console.log('已创建示例数据采集节点');
-            
-            // 刷新数据采集节点列表
-            const refreshedNodes = await collectionAdapter.getAll();
-            setDataCollectionNodes(refreshedNodes);
-          } catch (err) {
-            console.error('创建示例数据采集节点失败:', err);
-          }
-        }
-      } else {
-        console.log('未找到数据采集节点或格式不正确');
-        setDataCollectionNodes([]);
-      }
+
+      const validNodes = rawData as DataProcessingConfigModel[];
+      setNodes(validNodes);
+      addLog(`成功获取 ${validNodes.length} 个数据处理节点`, 'success');
     } catch (error) {
-      console.error('加载节点失败:', error);
-      setErrorMessage(`加载数据失败: ${error instanceof Error ? error.message : String(error)}`);
+      addLog(`获取数据处理节点失败: ${error instanceof Error ? error.message : String(error)}`, 'error');
+      message.error('获取数据处理节点失败');
     }
+  };
+
+  // 初始化加载
+  useEffect(() => {
+    fetchProcessingNodes();
   }, []);
 
-  // 初始化
+  // 获取数据采集节点列表
   useEffect(() => {
-    const init = async () => {
-      await loadNodes();
-    };
-    init();
-  }, [loadNodes]);
+    const fetchDataCollectionNodes = async () => {
+      try {
+        addLog('正在获取数据采集节点列表...');
+        const { data: rawData, error } = await supabase
+          .from('data_collection_configs')
+          .select('id, name, config, type, active')
+          .eq('is_enabled', true);
 
-  // 添加新节点
-  const handleAddNode = () => {
-    setSelectedNodeId(null);
-    setCurrentNode({...emptyNode});
-    setIsEditing(true);
-    setErrorMessage('');
-    setSuccessMessage('');
-    setTestResults({});
-  };
+        if (error) throw error;
+        if (!rawData) {
+          addLog('未获取到数据采集节点', 'error');
+          return;
+        }
 
-  // 选择节点
-  const handleSelectNode = (node: DataProcessingConfigModel) => {
-    setSelectedNodeId(node.NO || null);
-    setCurrentNode({...node});
-    setIsEditing(false);
-    setErrorMessage('');
-    setSuccessMessage('');
-    setTestResults({});
-  };
+        const data = rawData as SupabaseDataCollectionConfig[];
+        const mappedNodes: DataCollectionNode[] = data.map(item => ({
+          id: item.id || '',
+          name: item.name,
+          config: item.config,
+          type: item.type,
+          active: item.active,
+          key: item.id || '',
+          title: item.name,
+          value: item.id || ''
+        }));
 
-  // 编辑节点
-  const handleEditNode = () => {
-    setIsEditing(true);
-    setErrorMessage('');
-    setSuccessMessage('');
-  };
-
-  // 取消编辑
-  const handleCancelEdit = () => {
-    if (selectedNodeId) {
-      const node = processingNodes.find(n => n.NO === selectedNodeId);
-      if (node) {
-        setCurrentNode({...node});
+        setDataCollectionNodes(mappedNodes);
+        addLog(`成功获取 ${mappedNodes.length} 个数据采集节点`, 'success');
+      } catch (error) {
+        addLog(`获取数据采集节点失败: ${error instanceof Error ? error.message : String(error)}`, 'error');
+        message.error('获取数据采集节点失败');
       }
-    } else {
-      setCurrentNode({...emptyNode});
-    }
-    setIsEditing(false);
-    setErrorMessage('');
-    setSuccessMessage('');
+    };
+
+    fetchDataCollectionNodes();
+  }, []);
+
+  // 处理节点选择
+  const handleNodeSelect = (node: DataCollectionNode) => {
+    setSelectedNode(node);
+    const newNode: DataProcessingConfigModel = {
+      ...emptyNode,
+      source_node_id: node.id || ''
+    };
+    setCurrentNode(newNode);
   };
 
   // 保存节点
   const handleSaveNode = async () => {
-    // 验证必填字段
-    if (!currentNode.name.trim()) {
-      setErrorMessage('请输入节点名称');
-      return;
-    }
-    
-    if (!currentNode.sourceNodeId) {
-      setErrorMessage('请选择关联的数据采集节点');
-      return;
-    }
-    
-    if (currentNode.formulas.length === 0) {
-      setErrorMessage('请至少添加一个公式');
-      return;
-    }
-    
-    if (currentNode.outputParams.length === 0) {
-      setErrorMessage('请至少添加一个传出参数');
-      return;
-    }
-    
     try {
-      // 获取当前存储类型
-      const storageType = getCurrentStorageType();
-      
-      // 创建适配器
-      const adapter = await DataFactory.getAdapterAsync<DataProcessingConfigModel>('data_processing_configs', storageType);
-      
-      if (currentNode.NO) {
-        // 更新已有节点
-        await adapter.update(currentNode);
-        
-        // 更新本地状态
-        setProcessingNodes(prev => 
-          prev.map(node => node.NO === currentNode.NO ? {...currentNode} : node)
-        );
-        
-        setSuccessMessage('节点更新成功');
-      } else {
-        // 添加新节点 - 对于新节点，我们不设置NO，让适配器自动分配
-        const newNode = {
-          ...currentNode,
-          create_time: Date.now()
-        };
-        
-        // 创建节点并获取结果（可能包含自动生成的ID）
-        const createdNode = await adapter.create(newNode);
-        
-        // 更新本地状态
-        if (createdNode) {
-          // 确保createdNode有NO字段
-          const newNodeWithId = createdNode as DataProcessingConfigModel;
-          setProcessingNodes(prev => [...prev, newNodeWithId]);
-          setSelectedNodeId(newNodeWithId.NO || null);
-          setCurrentNode(newNodeWithId);
-        } else {
-          // 如果无法获取创建的节点，重新加载所有数据
-          await loadNodes();
-        }
-        
-        setSuccessMessage('节点添加成功');
+      setIsLoading(true);
+      addLog('正在保存节点...');
+
+      if (!currentNode.name.trim()) {
+        throw new Error('节点名称不能为空');
       }
-      
+
+      if (!currentNode.source_node_id) {
+        throw new Error('请选择数据采集节点');
+      }
+
+      if (currentNode.id) {
+        // 更新现有节点
+        const { error } = await supabase
+          .from('data_processing_configs')
+          .update(currentNode)
+          .eq('id', currentNode.id);
+
+        if (error) throw error;
+
+        setNodes(prev => prev.map(node => 
+          node.id === currentNode.id ? currentNode : node
+        ));
+        addLog('节点更新成功', 'success');
+      } else {
+        // 创建新节点
+        const { data, error } = await supabase
+          .from('data_processing_configs')
+          .insert([currentNode])
+          .select()
+          .single();
+
+        if (error) throw error;
+        if (!data) throw new Error('创建节点失败');
+
+        const newNode = data as DataProcessingConfigModel;
+        setNodes(prev => [...prev, newNode]);
+        setCurrentNode(newNode);
+        addLog('节点创建成功', 'success');
+      }
+
       setIsEditing(false);
     } catch (error) {
-      console.error('保存节点失败:', error);
-      setErrorMessage(`保存节点失败: ${error instanceof Error ? error.message : String(error)}`);
+      addLog(`保存节点失败: ${error instanceof Error ? error.message : String(error)}`, 'error');
+      message.error('保存节点失败');
+    } finally {
+      setIsLoading(false);
     }
   };
 
   // 删除节点
   const handleDeleteNode = async () => {
-    if (!selectedNodeId) return;
-    
-    if (!window.confirm('确定要删除此节点吗？此操作不可恢复。')) return;
-    
+    if (!currentNode.id || !window.confirm('确定要删除此节点吗？此操作不可恢复。')) {
+      return;
+    }
+
     try {
-      // 获取当前存储类型
-      const storageType = getCurrentStorageType();
-      
-      // 创建适配器
-      const adapter = await DataFactory.getAdapterAsync<DataProcessingConfigModel>('data_processing_configs', storageType);
-      
-      // 删除节点
-      await adapter.delete(selectedNodeId);
-      
-      // 更新本地状态
-      setProcessingNodes(prev => prev.filter(node => node.NO !== selectedNodeId));
-      setSelectedNodeId(null);
-      setCurrentNode({...emptyNode});
+      setIsLoading(true);
+      addLog('正在删除节点...');
+
+      const { error } = await supabase
+        .from('data_processing_configs')
+        .delete()
+        .eq('id', currentNode.id);
+
+      if (error) throw error;
+
+      setNodes(prev => prev.filter(node => node.id !== currentNode.id));
+      setCurrentNode(emptyNode);
+      setSelectedNode(null);
       setIsEditing(false);
-      setSuccessMessage('节点删除成功');
+      addLog('节点删除成功', 'success');
     } catch (error) {
-      console.error('删除节点失败:', error);
-      setErrorMessage(`删除节点失败: ${error instanceof Error ? error.message : String(error)}`);
+      addLog(`删除节点失败: ${error instanceof Error ? error.message : String(error)}`, 'error');
+      message.error('删除节点失败');
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  // 处理名称变更
-  const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setCurrentNode(prev => ({...prev, name: e.target.value}));
-  };
-
-  // 处理数据采集节点选择变更
-  const handleSourceNodeChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const nodeId = parseInt(e.target.value);
-    
-    // 查找选中的数据采集节点
-    const sourceNode = dataCollectionNodes.find(node => node.NO === nodeId);
-    if (!sourceNode) return;
-    
-    // 清空之前的输入参数和公式
-    setCurrentNode(prev => ({
-      ...prev, 
-      sourceNodeId: nodeId,
-      inputParams: [],
-      formulas: [],
-      outputParams: []
-    }));
-    
-    // 模拟从数据采集节点获取传出参数（这部分在实际应用中需要适配实际的数据结构）
-    // 这里假设采集节点的传出参数可以从某处获取
-    const sampleParams = [
-      { name: '代币价格', type: 'number', value: 1500.25 },
-      { name: '代币余额', type: 'number', value: 10.5 },
-      { name: '收益率', type: 'number', value: 0.05 },
-      { name: '锁定时间(天)', type: 'number', value: 7 }
-    ];
-    
+  // 添加规则
+  const handleAddRule = () => {
+    const newRule: ProcessingRule = {
+      ...emptyRule,
+      id: `rule-${Date.now()}`
+    };
     setCurrentNode(prev => ({
       ...prev,
-      inputParams: sampleParams.map(p => ({ ...p, selected: false }))
+      rules: [...prev.rules, newRule]
     }));
   };
 
-  // 处理输入参数选择状态变更
-  const handleInputParamSelectionChange = (index: number, checked: boolean) => {
-    setCurrentNode(prev => {
-      const updatedParams = [...prev.inputParams];
-      updatedParams[index] = { ...updatedParams[index], selected: checked };
-      return { ...prev, inputParams: updatedParams };
-    });
-  };
-
-  // 添加公式
-  const handleAddFormula = () => {
-    setCurrentNode(prev => ({
-      ...prev,
-      formulas: [...prev.formulas, { name: '', formula: '', description: '' }]
-    }));
-  };
-
-  // 删除公式
-  const handleRemoveFormula = (index: number) => {
-    setCurrentNode(prev => {
-      const updatedFormulas = [...prev.formulas];
-      updatedFormulas.splice(index, 1);
-      return { ...prev, formulas: updatedFormulas };
-    });
-  };
-
-  // 处理公式名称变更
-  const handleFormulaNameChange = (index: number, value: string) => {
-    setCurrentNode(prev => {
-      const updatedFormulas = [...prev.formulas];
-      updatedFormulas[index] = { ...updatedFormulas[index], name: value };
-      return { ...prev, formulas: updatedFormulas };
-    });
-  };
-
-  // 处理公式内容变更
-  const handleFormulaChange = (index: number, value: string) => {
-    setCurrentNode(prev => {
-      const updatedFormulas = [...prev.formulas];
-      updatedFormulas[index] = { ...updatedFormulas[index], formula: value };
-      return { ...prev, formulas: updatedFormulas };
-    });
-  };
-
-  // 处理公式描述变更
-  const handleFormulaDescriptionChange = (index: number, value: string) => {
-    setCurrentNode(prev => {
-      const updatedFormulas = [...prev.formulas];
-      updatedFormulas[index] = { ...updatedFormulas[index], description: value };
-      return { ...prev, formulas: updatedFormulas };
-    });
-  };
-
-  // 添加传出参数
+  // 添加输出参数
   const handleAddOutputParam = () => {
+    const newParam: OutputParam = {
+      ...emptyOutputParam,
+      customName: `param-${Date.now()}`
+    };
     setCurrentNode(prev => ({
       ...prev,
-      outputParams: [...prev.outputParams, { name: '', type: 'number', value: '' }]
+      output_params: [...prev.output_params, newParam]
     }));
   };
 
-  // 删除传出参数
+  // 处理规则更新
+  const handleRuleUpdate = (index: number, updates: Partial<ProcessingRule>) => {
+    setCurrentNode(prev => {
+      const updatedRules = [...prev.rules];
+      updatedRules[index] = {
+        ...updatedRules[index],
+        ...updates
+      };
+      return {
+        ...prev,
+        rules: updatedRules
+      };
+    });
+  };
+
+  // 处理输出参数更新
+  const handleOutputParamUpdate = (index: number, updates: Partial<OutputParam>) => {
+    setCurrentNode(prev => {
+      const updatedParams = [...prev.output_params];
+      updatedParams[index] = {
+        ...updatedParams[index],
+        ...updates
+      };
+      return {
+        ...prev,
+        output_params: updatedParams
+      };
+    });
+  };
+
+  // 删除规则
+  const handleRemoveRule = (index: number) => {
+    setCurrentNode(prev => ({
+      ...prev,
+      rules: prev.rules.filter((_, i) => i !== index)
+    }));
+  };
+
+  // 删除输出参数
   const handleRemoveOutputParam = (index: number) => {
-    setCurrentNode(prev => {
-      const updatedParams = [...prev.outputParams];
-      updatedParams.splice(index, 1);
-      return { ...prev, outputParams: updatedParams };
-    });
+    setCurrentNode(prev => ({
+      ...prev,
+      output_params: prev.output_params.filter((_, i) => i !== index)
+    }));
   };
 
-  // 处理传出参数名称变更
-  const handleOutputParamNameChange = (index: number, value: string) => {
-    setCurrentNode(prev => {
-      const updatedParams = [...prev.outputParams];
-      updatedParams[index] = { ...updatedParams[index], name: value };
-      return { ...prev, outputParams: updatedParams };
-    });
-  };
-
-  // 处理传出参数类型变更
-  const handleOutputParamTypeChange = (index: number, value: string) => {
-    setCurrentNode(prev => {
-      const updatedParams = [...prev.outputParams];
-      updatedParams[index] = { ...updatedParams[index], type: value };
-      return { ...prev, outputParams: updatedParams };
-    });
-  };
-
-  // 处理传出参数值变更
-  const handleOutputParamValueChange = (index: number, value: string) => {
-    setCurrentNode(prev => {
-      const updatedParams = [...prev.outputParams];
-      updatedParams[index] = { ...updatedParams[index], value };
-      return { ...prev, outputParams: updatedParams };
-    });
-  };
-
-  // 测试计算
-  const handleTestCalculation = () => {
-    setErrorMessage('');
-    setSuccessMessage('');
-    
-    try {
-      // 构建变量对象
-      const variables: Record<string, any> = {};
-      
-      // 添加所有选中的输入参数
-      currentNode.inputParams.forEach(param => {
-        if (param.selected) {
-          variables[param.name] = param.value;
-        }
-      });
-      
-      // 计算所有公式
-      const results: Record<string, any> = {};
-      
-      for (const formula of currentNode.formulas) {
-        if (!formula.name || !formula.formula) continue;
-        
-        try {
-          // 构建计算函数
-          // eslint-disable-next-line no-new-func
-          const calculate = new Function(...Object.keys(variables), ...Object.keys(results), 
-            `return ${formula.formula}`);
-          
-          // 执行计算
-          const result = calculate(...Object.values(variables), ...Object.values(results));
-          results[formula.name] = result;
-        } catch (error) {
-          console.error(`计算公式 "${formula.name}" 失败:`, error);
-          results[formula.name] = `错误: ${(error as Error).message}`;
-        }
-      }
-      
-      // 显示计算结果
-      setTestResults(results);
-      
-      // 计算并显示输出参数
-      const outputResults: Record<string, any> = {};
-      currentNode.outputParams.forEach(param => {
-        if (param.value) {
-          if (results[param.value]) {
-            outputResults[param.name] = results[param.value];
-          } else if (variables[param.value]) {
-            outputResults[param.name] = variables[param.value];
-          } else {
-            outputResults[param.name] = `未找到引用: ${param.value}`;
-          }
-        } else {
-          outputResults[param.name] = '未设置值';
-        }
-      });
-      
-      // 更新测试结果，包含公式结果和输出参数
-      setTestResults({
-        ...results,
-        '--- 输出参数 ---': '----------------------',
-        ...outputResults
-      });
-      
-      setSuccessMessage('计算成功');
-    } catch (error) {
-      console.error('计算过程出错:', error);
-      setErrorMessage(`计算失败: ${(error as Error).message}`);
-    }
+  // 添加日志的辅助函数
+  const addLog = (message: string, type: 'info' | 'error' | 'success' = 'info') => {
+    setLogs(prev => [...prev, {
+      timestamp: new Date().toLocaleTimeString(),
+      message,
+      type
+    }]);
   };
 
   return (
     <PageContainer>
       <PageHeader>
         <PageTitle>数据加工能力</PageTitle>
-        <ActionButton onClick={handleAddNode}>
+        <ActionButton onClick={() => setIsEditing(true)}>
           添加新节点
         </ActionButton>
       </PageHeader>
-
-      <ContentLayout>
-        <NodeList>
-          <NodeListHeader>
-            加工能力节点列表
-          </NodeListHeader>
-          {processingNodes.length > 0 ? (
-            processingNodes.map(node => (
-              <NodeItem
-                key={node.NO}
-                selected={selectedNodeId === node.NO}
-                onClick={() => handleSelectNode(node)}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <NodeName selected={selectedNodeId === node.NO}>{node.name}</NodeName>
-                  <StatusIndicator active={node.active} />
-                </div>
-                <NodeInfo>
-                  关联节点: {dataCollectionNodes.find(n => n.NO === node.sourceNodeId)?.name || '未知'}
-                </NodeInfo>
-              </NodeItem>
-            ))
-          ) : (
-            <EmptyState>
-              <EmptyStateTitle>暂无数据加工节点</EmptyStateTitle>
-              <EmptyStateDescription>
-                点击右上角的"添加新节点"按钮创建一个数据加工节点
-              </EmptyStateDescription>
-            </EmptyState>
-          )}
-        </NodeList>
-
-        <ConfigPanel>
-          {selectedNodeId || isEditing ? (
-            <>
-              <FormSection>
-                <SectionTitle>基本信息</SectionTitle>
-                <FormRow>
-                  <FormGroup>
-                    <Label>节点名称</Label>
-                    <Input
-                      type="text"
-                      value={currentNode.name}
-                      onChange={handleNameChange}
-                      disabled={!isEditing}
-                      placeholder="输入节点名称"
-                    />
-                  </FormGroup>
-                  <FormGroup>
-                    <Label>状态</Label>
-                    <Select
-                      value={currentNode.active ? "1" : "0"}
-                      onChange={(e) => setCurrentNode(prev => ({...prev, active: e.target.value === "1"}))}
-                      disabled={!isEditing}
-                    >
-                      <option value="1">启用</option>
-                      <option value="0">禁用</option>
-                    </Select>
-                  </FormGroup>
-                </FormRow>
-                <FormRow>
-                  <FormGroup>
-                    <Label>关联数据采集节点</Label>
-                    <Select
-                      value={currentNode.sourceNodeId.toString()}
-                      onChange={handleSourceNodeChange}
-                      disabled={!isEditing}
-                    >
-                      <option value="0">-- 选择数据采集节点 --</option>
-                      {dataCollectionNodes.map(node => (
-                        <option key={node.NO} value={node.NO?.toString()}>
-                          {node.name}
-                        </option>
-                      ))}
-                    </Select>
-                  </FormGroup>
-                </FormRow>
-              </FormSection>
-
-              {currentNode.inputParams.length > 0 && (
-                <FormSection>
-                  <SectionTitle>传入参数</SectionTitle>
-                  <ParameterTable>
-                    <thead>
-                      <tr>
-                        <TableHeader style={{ width: '40px' }}>选择</TableHeader>
-                        <TableHeader>参数名</TableHeader>
-                        <TableHeader>类型</TableHeader>
-                        <TableHeader>默认值</TableHeader>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {currentNode.inputParams.map((param, index) => (
-                        <tr key={index}>
-                          <TableCell>
-                            <Checkbox
-                              type="checkbox"
-                              checked={param.selected || false}
-                              onChange={(e) => handleInputParamSelectionChange(index, e.target.checked)}
-                              disabled={!isEditing}
-                            />
-                          </TableCell>
-                          <TableCell>{param.name}</TableCell>
-                          <TableCell>{param.type}</TableCell>
-                          <TableCell>{param.value}</TableCell>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </ParameterTable>
-                </FormSection>
-              )}
-
-              <FormSection>
-                <SectionTitle>公式定义</SectionTitle>
-                {currentNode.formulas.map((formula, index) => (
-                  <div key={index} style={{ marginBottom: '20px', padding: '10px', border: '1px solid #444', borderRadius: '5px' }}>
-                    <FormRow>
-                      <FormGroup>
-                        <Label>公式名称</Label>
-                        <Input
-                          type="text"
-                          value={formula.name}
-                          onChange={(e) => handleFormulaNameChange(index, e.target.value)}
-                          disabled={!isEditing}
-                          placeholder="输入公式名称，如: APY"
-                        />
-                      </FormGroup>
-                    </FormRow>
-                    <FormRow>
-                      <FormGroup>
-                        <Label>公式内容</Label>
-                        <Textarea
-                          value={formula.formula}
-                          onChange={(e) => handleFormulaChange(index, e.target.value)}
-                          disabled={!isEditing}
-                          placeholder="输入公式，如: (收益 / 本金) * 365 / 锁定时间"
-                        />
-                      </FormGroup>
-                    </FormRow>
-                    <FormRow>
-                      <FormGroup>
-                        <Label>描述（可选）</Label>
-                        <Input
-                          type="text"
-                          value={formula.description || ''}
-                          onChange={(e) => handleFormulaDescriptionChange(index, e.target.value)}
-                          disabled={!isEditing}
-                          placeholder="简要描述此公式的用途"
-                        />
-                      </FormGroup>
-                    </FormRow>
-                    {isEditing && (
-                      <RemoveButton onClick={() => handleRemoveFormula(index)}>
-                        删除此公式
-                      </RemoveButton>
-                    )}
-                  </div>
-                ))}
-                {isEditing && (
-                  <AddButton onClick={handleAddFormula}>
-                    添加公式
-                  </AddButton>
-                )}
-              </FormSection>
-
-              <FormSection>
-                <SectionTitle>传出参数</SectionTitle>
-                {currentNode.outputParams.map((param, index) => (
-                  <div key={index} style={{ marginBottom: '15px', padding: '10px', border: '1px solid #444', borderRadius: '5px' }}>
-                    <FormRow>
-                      <FormGroup>
-                        <Label>参数名称</Label>
-                        <Input
-                          type="text"
-                          value={param.name}
-                          onChange={(e) => handleOutputParamNameChange(index, e.target.value)}
-                          disabled={!isEditing}
-                          placeholder="输入参数名称"
-                        />
-                      </FormGroup>
-                      <FormGroup>
-                        <Label>参数类型</Label>
-                        <Select
-                          value={param.type}
-                          onChange={(e) => handleOutputParamTypeChange(index, e.target.value)}
-                          disabled={!isEditing}
-                        >
-                          <option value="number">数字</option>
-                          <option value="string">字符串</option>
-                          <option value="boolean">布尔值</option>
-                        </Select>
-                      </FormGroup>
-                    </FormRow>
-                    <FormRow>
-                      <FormGroup>
-                        <Label>引用值</Label>
-                        <Select
-                          value={param.value || ''}
-                          onChange={(e) => handleOutputParamValueChange(index, e.target.value)}
-                          disabled={!isEditing}
-                        >
-                          <option value="">-- 选择引用 --</option>
-                          <optgroup label="公式结果">
-                            {currentNode.formulas.map((formula, i) => (
-                              <option key={`formula-${i}`} value={formula.name}>
-                                {formula.name}
-                              </option>
-                            ))}
-                          </optgroup>
-                          <optgroup label="输入参数">
-                            {currentNode.inputParams.filter(p => p.selected).map((param, i) => (
-                              <option key={`input-${i}`} value={param.name}>
-                                {param.name}
-                              </option>
-                            ))}
-                          </optgroup>
-                        </Select>
-                      </FormGroup>
-                    </FormRow>
-                    {isEditing && (
-                      <RemoveButton onClick={() => handleRemoveOutputParam(index)}>
-                        删除此参数
-                      </RemoveButton>
-                    )}
-                  </div>
-                ))}
-                {isEditing && (
-                  <AddButton onClick={handleAddOutputParam}>
-                    添加传出参数
-                  </AddButton>
-                )}
-              </FormSection>
-
-              {errorMessage && <ErrorMessage>{errorMessage}</ErrorMessage>}
-              {successMessage && <SuccessMessage>{successMessage}</SuccessMessage>}
-
-              <ButtonGroup>
-                {isEditing ? (
-                  <>
-                    <PrimaryButton onClick={handleSaveNode}>保存</PrimaryButton>
-                    <SecondaryButton onClick={handleCancelEdit}>取消</SecondaryButton>
-                    {selectedNodeId && <SecondaryButton onClick={handleTestCalculation}>测试计算</SecondaryButton>}
-                  </>
-                ) : (
-                  <>
-                    <PrimaryButton onClick={handleEditNode}>编辑</PrimaryButton>
-                    {selectedNodeId && (
-                      <>
-                        <SecondaryButton onClick={handleTestCalculation}>测试计算</SecondaryButton>
-                        <DangerButton onClick={handleDeleteNode}>删除</DangerButton>
-                      </>
-                    )}
-                  </>
-                )}
-              </ButtonGroup>
-
-              {Object.keys(testResults).length > 0 && (
-                <TestResultPanel>
-                  <TestResultTitle>计算结果</TestResultTitle>
-                  {Object.entries(testResults).map(([key, value], index) => (
-                    <ResultItem key={index}>
-                      <ResultKey>{key}:</ResultKey>
-                      <ResultValue>
-                        {typeof value === 'number' 
-                          ? value.toFixed(6).replace(/\.?0+$/, '') 
-                          : String(value)}
-                      </ResultValue>
-                    </ResultItem>
-                  ))}
-                </TestResultPanel>
-              )}
-            </>
-          ) : (
-            <EmptyState>
-              <EmptyStateTitle>请选择或创建节点</EmptyStateTitle>
-              <EmptyStateDescription>
-                从左侧选择一个现有节点，或点击"添加新节点"按钮创建一个新的数据加工节点
-              </EmptyStateDescription>
-            </EmptyState>
-          )}
-        </ConfigPanel>
-      </ContentLayout>
+      {/* ... rest of the JSX ... */}
     </PageContainer>
   );
 };

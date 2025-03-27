@@ -253,7 +253,7 @@ export interface ExchangeConfigModel {
 
 // API配置接口
 export interface ApiConfigModel {
-  NO?: number;
+  NO?: number;                // 修改回可选字段
   name: string;               // API名称
   apiType?: 'HTTP' | 'CHAIN'; // API类型：HTTP或链上数据，默认为HTTP
   baseUrl: string;            // API基础URL

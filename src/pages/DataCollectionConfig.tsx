@@ -239,7 +239,7 @@ const Input = styled.input`
   }
 `;
 
-const Select = styled.select`
+const Select = styled.select<{ value: string }>`
   width: 70%;
   padding: 8px 12px;
   background-color: #333333;
@@ -480,39 +480,43 @@ const VariableInputTable = styled.table`
 // 数据采集节点模型
 interface DataCollectionNodeModel {
   id?: number;
+  NO?: number;
   name: string;
   active: boolean;
   apiId: number;
   apiName?: string;
-  apiType?: 'HTTP' | 'CHAIN';
+  apiType?: string;
   fieldMappings: FieldMapping[];
-  params?: Array<{name: string; value: string}>;
+  config?: {
+    apiParams?: {
+      customConfig?: string;
+    };
+  };
 }
 
 // 字段映射模型
 interface FieldMapping {
-  id?: number;
-  sourceField: string;  // JSON路径
-  targetField: string;  // 自定义字段名
-  description: string;  // 显示名称
+  sourceField: string;
+  targetField: string;
+  description?: string;
+}
+
+// API响应模型
+interface ApiResponse {
+  success: boolean;
+  message: string;
+  data?: any;
+  error?: string;
+  logs: string[]; // 改为必需字段
+  extractedFields?: Record<string, any>;
 }
 
 // 测试结果模型
 interface TestResult {
   success: boolean;
   message: string;
-  logs: string[];
   data?: any;
-}
-
-// 新增 API 响应数据模型
-interface ApiResponse {
-  success: boolean;
-  message: string;
-  data?: any;
-  error?: string;
-  logs?: string[];
-  extractedFields?: Record<string, any>;
+  logs: string[]; // 改为必需字段
 }
 
 // 修改为使用自定义属性存储
@@ -659,10 +663,9 @@ const DataCollectionConfig: React.FC = () => {
   const [nodes, setNodes] = useState<DataCollectionNodeModel[]>([]);
   const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null);
   const [currentNode, setCurrentNode] = useState<DataCollectionNodeModel>({
-    id: 0, // 修改为数字类型
     name: '',
     active: true,
-    apiId: 0, // 修改为数字类型
+    apiId: 0,
     fieldMappings: []
   });
   const [apis, setApis] = useState<ApiConfigModel[]>([]);
@@ -803,12 +806,14 @@ const DataCollectionConfig: React.FC = () => {
         
         return {
           id: node.NO,
+          NO: node.NO,
           name: node.name,
           active: node.active,
           apiId: apiId,
           apiName: apiConfig?.name,
           apiType: apiConfig?.apiType,
-          fieldMappings: fieldMappings
+          fieldMappings: fieldMappings,
+          config: node.config
         };
       });
       
@@ -893,16 +898,16 @@ const DataCollectionConfig: React.FC = () => {
   
   // 更新 API ID 并自动加载字段映射和检测变量
   const handleApiChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const apiId = parseInt(e.target.value);
+    const apiId = e.target.value ? parseInt(e.target.value, 10) : 0;
     const selectedApi = apis.find(api => api.NO === apiId);
     
-    setCurrentNode({
-      ...currentNode,
+    setCurrentNode(prev => ({
+      ...prev,
       apiId,
       apiName: selectedApi?.name,
       apiType: selectedApi?.apiType || 'HTTP',
       fieldMappings: [] // 清空字段映射，等待从API配置中加载
-    });
+    }));
     
     // 自动加载字段映射
     if (apiId) {
@@ -1351,7 +1356,7 @@ const DataCollectionConfig: React.FC = () => {
       if (apiConfig.apiKey) {
         headers['X-API-Key'] = apiConfig.apiKey;
       }
-
+      
       if (apiConfig.apiSecret) {
         headers['Authorization'] = `Bearer ${apiConfig.apiSecret}`;
       }
@@ -1480,13 +1485,13 @@ const DataCollectionConfig: React.FC = () => {
             const result = await contract[apiConfig.methodName](...params);
             logs.push(`[${new Date().toISOString()}] 合约调用成功`);
             
-            return {
+        return {
               success: true,
               message: '链上调用成功',
               data: result,
-              logs
-            };
-          } catch (error) {
+          logs
+        };
+        } catch (error) {
             logs.push(`[${new Date().toISOString()}] 合约调用失败: ${error instanceof Error ? error.message : String(error)}`);
             throw error;
           }
@@ -1502,13 +1507,13 @@ const DataCollectionConfig: React.FC = () => {
         success: true,
         message: '获取区块信息成功',
         data: block,
-        logs
+          logs
       };
       
     } catch (error) {
       logs.push(`[${new Date().toISOString()}] 链上调用失败: ${error instanceof Error ? error.message : String(error)}`);
-      return {
-        success: false,
+        return {
+          success: false,
         message: `链上调用失败: ${error instanceof Error ? error.message : String(error)}`,
         error: error instanceof Error ? error.message : String(error),
         logs
@@ -1975,78 +1980,59 @@ const DataCollectionConfig: React.FC = () => {
     }
   };
 
-  // 测试API
-  const handleTest = async () => {
-    if (!currentNode.apiId) {
-      setMessage({ type: 'error', text: '请先选择API配置' });
-      return;
+  // 处理测试结果
+  const handleTestResult = (testResult: TestResult) => {
+    setTestResult(testResult);
+      setMessage({
+      text: testResult.message,
+      type: testResult.success ? 'success' : 'error'
+    });
+    
+    // 更新日志，确保 logs 存在
+    if (testResult.logs && testResult.logs.length > 0) {
+      setLogs(prevLogs => [...prevLogs, ...testResult.logs]);
     }
-    
-    // 设置测试中状态
-    setIsTesting(true);
-    setTestResult(null);
-    const testLogs: string[] = [];
-    
-    testLogs.push(`[${new Date().toISOString()}] 开始测试API...`);
-    testLogs.push(`[${new Date().toISOString()}] 当前存储类型: ${storageType === StorageType.Supabase ? 'Supabase云数据库' : '浏览器本地存储'}`);
-    testLogs.push(`[${new Date().toISOString()}] 使用API ID: ${currentNode.apiId}`);
+  };
 
+  // 测试 API 函数
+  const testApi = async (node: DataCollectionNodeModel) => {
     try {
-      // 检查必填变量
-      const missingVariables = detectedVariables.filter(variable => !inputVariables[variable]);
-      if (missingVariables.length > 0) {
-        const errorMsg = `缺少必填变量: ${missingVariables.join(', ')}`;
-        testLogs.push(`[${new Date().toISOString()}] 错误: ${errorMsg}`);
-        
-        setTestResult({
-          success: false,
-          message: errorMsg,
-          logs: testLogs
-        });
-        
-        setMessage({
-          text: errorMsg,
-          type: 'error'
-        });
-        
-        setIsTesting(false);
-        return;
+      // 获取API配置
+      const selectedApi = apis.find(api => api.NO === node.apiId);
+      if (!selectedApi) {
+        throw new Error('未找到对应的API配置');
       }
-      
-      testLogs.push(`[${new Date().toISOString()}] 使用变量: ${JSON.stringify(inputVariables)}`);
-      
-      // 调用API获取数据
-      const response = await fetchApiData(currentNode.apiId, inputVariables);
-      
-      // 合并日志
-      testLogs.push(...(response.logs || []));
-      
-      // 更新测试结果
-      const testResult: TestResult = {
+
+      // 调用 fetchApiData 函数
+      const response = await fetchApiData(node.apiId, inputVariables);
+      return response;
+    } catch (error) {
+      console.error('测试API失败:', error);
+      throw error;
+    }
+  };
+
+  // 测试 API 调用
+  const testApiCall = async (node: DataCollectionNodeModel) => {
+    setIsLoading(true);
+    try {
+      const response = await testApi(node);
+      const result: TestResult = {
         success: response.success,
         message: response.message,
-        logs: testLogs,
-        data: response.data
+        data: response.data,
+        logs: response.logs || [] // 确保始终有日志数组
       };
-      
-      setTestResult(testResult);
-      
-      // 如果测试成功并且有字段映射，尝试提取字段
-      if (response.success && response.data && currentNode.fieldMappings && currentNode.fieldMappings.length > 0) {
-        const extractedFields = extractFieldsFromResponse(response.data, currentNode.fieldMappings, testResult.logs);
-        setExtractedData(extractedFields);
-      }
+      handleTestResult(result);
     } catch (error) {
-      console.error('API测试失败:', error);
-      testLogs.push(`[${new Date().toISOString()}] 错误: ${error instanceof Error ? error.message : String(error)}`);
-      
-      setTestResult({
+      const errorResult: TestResult = {
         success: false,
-        message: `测试失败: ${error instanceof Error ? error.message : String(error)}`,
-        logs: testLogs
-      });
+        message: error instanceof Error ? error.message : String(error),
+        logs: [] // 确保始终有日志数组
+      };
+      handleTestResult(errorResult);
     } finally {
-      setIsTesting(false);
+      setIsLoading(false);
     }
   };
 
@@ -2493,12 +2479,12 @@ const DataCollectionConfig: React.FC = () => {
                 <Label>选择 API</Label>
                 <div style={{ display: 'flex', gap: '10px' }}>
                   <Select
-                    value={currentNode.apiId || ''}
+                    value={String(currentNode.apiId || '')}
                     onChange={handleApiChange}
                   >
                     <option value="">-- 请选择 API --</option>
                     {apis.map(api => (
-                      <option key={api.NO} value={api.NO}>
+                      <option key={api.NO} value={String(api.NO || '')}>
                         {api.name} ({api.apiType || 'HTTP'})
                       </option>
                     ))}
@@ -2629,10 +2615,10 @@ const DataCollectionConfig: React.FC = () => {
                           ];
                         }
                         
-                        const displayValue = value === null ? 'null' : 
-                          value === undefined ? 'undefined' : 
+                          const displayValue = value === null ? 'null' : 
+                            value === undefined ? 'undefined' : 
                           typeof value === 'string' ? `"${value}"` : 
-                          String(value);
+                            String(value);
                           
                         return [`${indent}${currentPath}: ${displayValue} (${typeof value})`];
                       });

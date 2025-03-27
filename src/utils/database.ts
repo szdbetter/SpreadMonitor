@@ -1,6 +1,42 @@
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
+
 // 数据采集配置模型
+export interface ApiConfigModel {
+  id?: string;
+  name: string;
+  apiType: 'HTTP' | 'CHAIN';
+  baseUrl: string;
+  method: 'GET' | 'POST';
+  payload?: string;
+  apiKey?: string;
+  apiSecret?: string;
+  exchangeId?: string;
+  active: boolean;
+  fieldMappings?: Record<string, string>;
+  customVariables?: Record<string, string>;
+}
+
+export interface ProcessingRule {
+  id?: string;
+  name: string;
+  type: 'TRANSFORM' | 'FILTER' | 'AGGREGATE';
+  config: Record<string, any>;
+  conditions?: Record<string, any>[];
+  active: boolean;
+}
+
+export interface OutputParam {
+  customName: string;
+  displayName: string;
+  jsonPath: string;
+  type: 'STRING' | 'NUMBER' | 'BOOLEAN' | 'OBJECT' | 'ARRAY';
+  targetField?: string;
+  value?: string;
+}
+
 export interface DataCollectionConfigModel {
   NO?: number;
+  id?: string;
   name: string;
   type: 'contract' | 'api' | 'websocket';
   config: {
@@ -25,76 +61,22 @@ export interface DataCollectionConfigModel {
   create_time?: number;
 }
 
+export interface DataProcessingConfigModel {
+  id?: string;
+  name: string;
+  source_node_id: string;
+  rules: ProcessingRule[];
+  output_params: OutputParam[];
+  is_enabled: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
 export class Database {
   private db: IDBDatabase;
 
   constructor(db: IDBDatabase) {
     this.db = db;
-  }
-
-  // 通用获取方法
-  async get(storeName: string): Promise<any> {
-    return new Promise((resolve, reject) => {
-      const transaction = this.db.transaction([storeName], 'readonly');
-      const store = transaction.objectStore(storeName);
-      const request = store.getAll();
-
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-  }
-
-  // 通用设置方法
-  async set(storeName: string, data: any): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const transaction = this.db.transaction([storeName], 'readwrite');
-      const store = transaction.objectStore(storeName);
-      
-      // 不再清空存储区域，而是直接保存数据
-      if (Array.isArray(data)) {
-        // 如果是数组，先清空存储区域，然后逐个添加
-        const clearRequest = store.clear();
-        
-        clearRequest.onsuccess = () => {
-          // 使用事务完成计数器来确保所有添加操作完成
-          let completed = 0;
-          const total = data.length;
-          
-          if (total === 0) {
-            // 如果数组为空，直接完成
-            resolve();
-            return;
-          }
-          
-          // 逐个添加数据
-          data.forEach((item) => {
-            const addRequest = store.add(item);
-            
-            addRequest.onsuccess = () => {
-              completed++;
-              if (completed === total) {
-                resolve();
-              }
-            };
-            
-            addRequest.onerror = (event) => {
-              console.error('添加数据失败:', event);
-              reject(addRequest.error);
-            };
-          });
-        };
-        
-        clearRequest.onerror = () => {
-          console.error('清空存储区域失败:', clearRequest.error);
-          reject(clearRequest.error);
-        };
-      } else {
-        // 如果不是数组，直接添加单个数据
-        const addRequest = store.add(data);
-        addRequest.onsuccess = () => resolve();
-        addRequest.onerror = () => reject(addRequest.error);
-      }
-    });
   }
 
   // 获取所有数据采集配置
@@ -108,30 +90,52 @@ export class Database {
     return configs.find(config => config.NO === NO) || null;
   }
 
-  // 添加数据采集配置
-  async addDataCollectionConfig(config: DataCollectionConfigModel): Promise<void> {
-    const configs = await this.getAllDataCollectionConfigs();
-    const newConfig = {
-      ...config,
-      NO: Math.max(0, ...configs.map(c => c.NO || 0)) + 1,
-      create_time: Date.now()
-    };
-    await this.set('data_collection_configs', [...configs, newConfig]);
-  }
+  // 通用的获取方法
+  private async get(storeName: string): Promise<any[]> {
+    return new Promise((resolve, reject) => {
+      const transaction = this.db.transaction([storeName], 'readonly');
+      const objectStore = transaction.objectStore(storeName);
+      const request = objectStore.getAll();
 
-  // 更新数据采集配置
-  async updateDataCollectionConfig(config: DataCollectionConfigModel): Promise<void> {
-    if (!config.NO) throw new Error('配置NO不能为空');
-    const configs = await this.getAllDataCollectionConfigs();
-    const index = configs.findIndex(c => c.NO === config.NO);
-    if (index === -1) throw new Error('配置不存在');
-    configs[index] = config;
-    await this.set('data_collection_configs', configs);
-  }
+      request.onsuccess = () => {
+        resolve(request.result);
+      };
 
-  // 删除数据采集配置
-  async deleteDataCollectionConfig(NO: number): Promise<void> {
-    const configs = await this.getAllDataCollectionConfigs();
-    await this.set('data_collection_configs', configs.filter(c => c.NO !== NO));
+      request.onerror = () => {
+        reject(request.error);
+      };
+    });
   }
-} 
+}
+
+// 定义 Supabase 数据库表结构
+interface Tables {
+  data_collection_configs: {
+    Row: DataCollectionConfigModel;
+    Insert: Omit<DataCollectionConfigModel, 'id' | 'create_time'>;
+    Update: Partial<DataCollectionConfigModel>;
+  };
+  data_processing_configs: {
+    Row: DataProcessingConfigModel;
+    Insert: Omit<DataProcessingConfigModel, 'id' | 'created_at' | 'updated_at'>;
+    Update: Partial<DataProcessingConfigModel>;
+  };
+}
+
+interface DatabaseSchema {
+  public: {
+    Tables: Tables;
+  };
+}
+
+export type DatabaseTables = DatabaseSchema['public']['Tables'];
+export type TableName = keyof DatabaseTables;
+
+export type Row<T extends TableName> = DatabaseTables[T]['Row'];
+export type Insert<T extends TableName> = DatabaseTables[T]['Insert'];
+export type Update<T extends TableName> = DatabaseTables[T]['Update'];
+
+export type DataCollectionConfig = Row<'data_collection_configs'>;
+export type DataProcessingConfig = Row<'data_processing_configs'>;
+
+export type { PostgrestError } from '@supabase/postgrest-js'; 
