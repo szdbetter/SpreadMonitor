@@ -436,7 +436,7 @@ const ChainConfig: React.FC = () => {
     };
     
     loadChains();
-  }, [selectedChain]);
+  }, []); // 移除 selectedChain 依赖
   
   // 处理链选择
   const handleChainSelect = (chain: ChainConfigModel) => {
@@ -467,6 +467,7 @@ const ChainConfig: React.FC = () => {
     setError(null);
   };
   
+  // 编辑链
   const handleEditChain = () => {
     if (selectedChain) {
       setOriginalChain({ ...selectedChain });
@@ -474,10 +475,12 @@ const ChainConfig: React.FC = () => {
     }
   };
   
+  // 保存链
   const handleSaveChain = async () => {
     if (!selectedChain) return;
     
     try {
+      setIsLoading(true);
       // 验证必填字段
       if (!selectedChain.name.trim()) {
         setError('链名称不能为空');
@@ -498,50 +501,27 @@ const ChainConfig: React.FC = () => {
         return;
       }
       
-      // 准备要保存的数据，转换为数据库模型格式
+      // 准备要保存的数据
       const chainToSave = {
         ...selectedChain,
-        rpcUrls: JSON.stringify(processedRpcUrls) // 转换为字符串格式保存到数据库
+        rpcUrls: processedRpcUrls // 保持数组格式
       };
       
-      let savedChainNo = 0;
-      
-      // 如果是新链（没有NO字段），则创建新记录
-      if (!chainToSave.NO) {
-        const createdChain = await chainConfigAccess.create(chainToSave as any); // 使用 any 类型暂时绕过类型检查
-        savedChainNo = createdChain.NO || 0;
-        
-        // 重新加载链列表
-        const updatedChains = await chainConfigAccess.getAll();
-        const processedChains = updatedChains.map(chain => ({
-          ...chain,
-          rpcUrls: parseRpcUrls(chain.rpcUrls) // 确保内存中的数据是数组格式
-        }));
-        setChains(processedChains);
-        
-        // 设置当前选中的链为新创建的链
-        const newChain = processedChains.find(chain => chain.NO === savedChainNo);
-        if (newChain) {
-          setSelectedChain(newChain);
-        }
-      } else {
+      if (chainToSave.NO) {
         // 更新现有链
-        await chainConfigAccess.update(chainToSave as any); // 使用 any 类型暂时绕过类型检查
-        savedChainNo = chainToSave.NO;
-        
-        // 更新本地状态
-        setChains(chains.map(chain => 
-          chain.NO === chainToSave.NO ? {
-            ...chainToSave,
-            rpcUrls: processedRpcUrls // 确保内存中的数据是数组格式
-          } : chain
+        await chainConfigAccess.update(chainToSave);
+        setChains(prev => prev.map(chain => 
+          chain.NO === chainToSave.NO ? chainToSave : chain
         ));
-        
-        // 更新选中的链
-        setSelectedChain({
-          ...chainToSave,
-          rpcUrls: processedRpcUrls // 确保内存中的数据是数组格式
-        });
+      } else {
+        // 创建新链
+        const createdChain = await chainConfigAccess.create(chainToSave);
+        const newChain = {
+          ...createdChain,
+          rpcUrls: processedRpcUrls
+        };
+        setChains(prev => [...prev, newChain]);
+        setSelectedChain(newChain);
       }
       
       setIsEditing(false);
@@ -549,40 +529,51 @@ const ChainConfig: React.FC = () => {
     } catch (err) {
       console.error('Failed to save chain:', err);
       setError('保存失败，请重试');
+    } finally {
+      setIsLoading(false);
     }
   };
   
+  // 取消编辑
   const handleCancelEdit = () => {
+    if (originalChain) {
+      setSelectedChain(originalChain);
+    }
     setIsEditing(false);
-    setOriginalChain(null);
+    setError(null);
   };
   
+  // 删除链
   const handleDeleteChain = async () => {
-    if (!selectedChain || !selectedChain.NO) return;
-    
-    if (window.confirm(`确定要删除 ${selectedChain.name} 链配置吗？`)) {
-      try {
-        await chainConfigAccess.delete(selectedChain.NO);
-        
-        // 更新本地状态
-        const updatedChains = chains.filter(chain => chain.NO !== selectedChain.NO);
-        setChains(updatedChains);
-        
-        // 如果还有其他链，则选择第一个，否则清空选择
-        if (updatedChains.length > 0) {
-          setSelectedChain(updatedChains[0]);
-        } else {
-          setSelectedChain(null);
-        }
-        
-        setIsEditing(false);
-        setOriginalChain(null);
-        setError(null);
-      } catch (err) {
-        console.error('Failed to delete chain:', err);
-        setError('删除链配置失败');
-      }
+    if (!selectedChain?.NO || !window.confirm('确定要删除此链吗？此操作不可恢复。')) {
+      return;
     }
+    
+    try {
+      setIsLoading(true);
+      await chainConfigAccess.delete(selectedChain.NO);
+      
+      setChains(prev => prev.filter(chain => chain.NO !== selectedChain.NO));
+      setSelectedChain(null);
+      setOriginalChain(null);
+      setIsEditing(false);
+      setError(null);
+    } catch (err) {
+      console.error('Failed to delete chain:', err);
+      setError('删除失败，请重试');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+  
+  // 处理字段更新
+  const handleFieldChange = (field: keyof ChainConfigModel, value: any) => {
+    if (!selectedChain || !isEditing) return;
+    
+    setSelectedChain(prev => ({
+      ...prev!,
+      [field]: value
+    }));
   };
   
   const handleAddRpcUrl = () => {
@@ -862,10 +853,7 @@ const ChainConfig: React.FC = () => {
                       <Label>链名称<span className="required">*</span></Label>
                       <Input 
                         value={selectedChain?.name || ''} 
-                        onChange={(e) => selectedChain && setSelectedChain({
-                          ...selectedChain, 
-                          name: e.target.value
-                        } as ChainConfigModel)}
+                        onChange={(e) => handleFieldChange('name', e.target.value)}
                         placeholder="例如：Ethereum"
                       />
                     </FormGroup>
@@ -876,10 +864,7 @@ const ChainConfig: React.FC = () => {
                       <Input 
                         type="number" 
                         value={selectedChain?.chainId || 0} 
-                        onChange={(e) => selectedChain && setSelectedChain({
-                          ...selectedChain, 
-                          chainId: parseInt(e.target.value) || 0
-                        } as ChainConfigModel)}
+                        onChange={(e) => handleFieldChange('chainId', parseInt(e.target.value) || 0)}
                         placeholder="例如：1 (Ethereum)"
                       />
                     </FormGroup>
@@ -889,10 +874,7 @@ const ChainConfig: React.FC = () => {
                       <Label>状态</Label>
                       <Select 
                         value={selectedChain?.active ? 'true' : 'false'}
-                        onChange={(e) => selectedChain && setSelectedChain({
-                          ...selectedChain, 
-                          active: e.target.value === 'true'
-                        } as ChainConfigModel)}
+                        onChange={(e) => handleFieldChange('active', e.target.value === 'true')}
                       >
                         <option value="true">启用</option>
                         <option value="false">禁用</option>

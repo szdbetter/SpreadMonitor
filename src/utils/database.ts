@@ -65,9 +65,24 @@ export interface DataProcessingConfigModel {
   id?: string;
   name: string;
   source_node_id: string;
-  rules: ProcessingRule[];
-  output_params: OutputParam[];
-  is_enabled: boolean;
+  input_params: Array<{
+    name: string;
+    type: string;
+    value?: any;
+    selected?: boolean;
+  }>;
+  formulas: Array<{
+    name: string;
+    formula: string;
+    description?: string;
+    result?: any;
+  }>;
+  output_params: Array<{
+    name: string;
+    type: string;
+    value?: string;
+  }>;
+  active: boolean;
   created_at?: string;
   updated_at?: string;
 }

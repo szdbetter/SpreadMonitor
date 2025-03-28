@@ -1,55 +1,73 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useEffect, useState } from 'react';
 import styled from 'styled-components';
-import type { DataCollectionConfigModel, DataProcessingConfigModel, ProcessingRule, OutputParam } from '../utils/database';
-import { DataFactory, StorageType } from '../services/adapters/dataFactory';
-import { getCurrentStorageType, addStorageTypeListener } from '../services/adapters/storageManager';
-import { supabase } from '../lib/supabaseClient';
-import { Button as AntButton, Select as AntSelect, Input as AntInput, Space, Card as AntCard, message } from 'antd';
-import { PlusOutlined, DeleteOutlined } from '@ant-design/icons';
-import { fetchApiData, extractFieldValues } from '../services/dataCollectionService';
-import type { ApiConfigModel } from '../services/database';
+import { Button, Input, Select, Layout, Menu, ConfigProvider, theme } from 'antd';
 import type { SelectProps } from 'antd/es/select';
-import type { BaseOptionType, DefaultOptionType } from 'antd/es/select';
+import { createClient } from '@supabase/supabase-js';
+import type { DataProcessingConfigModel, DataCollectionConfigModel } from '../utils/database';
+import { useNavigate, useLocation } from 'react-router-dom';
 
-// 简化的数据采集节点类型
-interface DataCollectionNode extends DataCollectionConfigModel {
+const { Content, Sider } = Layout;
+
+// 创建 Supabase 客户端
+const supabaseUrl = process.env.REACT_APP_SUPABASE_URL || 'https://your-project.supabase.co';
+const supabaseKey = process.env.REACT_APP_SUPABASE_ANON_KEY || 'your-anon-key';
+
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+// 类型定义
+interface Log {
+  type: 'success' | 'error' | 'info';
+  message: string;
+  timestamp: string;
+}
+
+type DataCollectionNodeType = DataCollectionConfigModel['type'];
+
+interface ExtendedDataCollectionNode extends Omit<DataCollectionConfigModel, 'type'> {
+  type: DataCollectionNodeType;
   key: string;
   title: string;
   value: string;
 }
 
-// 初始空节点
-const emptyNode: DataProcessingConfigModel = {
-  id: '',
-  name: '',
-  source_node_id: '',
-  rules: [],
-  output_params: [],
-  is_enabled: true
-};
+interface InputParamType {
+  name: string;
+  type: string;
+  value?: any;
+  selected?: boolean;
+}
 
-// 初始空规则
-const emptyRule: ProcessingRule = {
-  id: '',
-  name: '',
-  type: 'TRANSFORM',
-  config: {},
-  active: true
-};
+interface OutputParamType {
+  name: string;
+  type: string;
+  value?: string;
+}
 
-// 初始空输出参数
-const emptyOutputParam: OutputParam = {
-  customName: '',
-  displayName: '',
-  jsonPath: '',
-  type: 'STRING',
-  targetField: '',
-  value: ''
-};
+interface FormulaType {
+  name: string;
+  formula: string;
+  description?: string;
+  result?: any;
+}
 
-// 样式组件
+interface RawDataProcessingConfig extends Omit<DataProcessingConfigModel, 'input_params' | 'output_params' | 'formulas'> {
+  input_params: string;
+  output_params: string;
+  formulas: string;
+}
+
+// 样式组件定义
+const LoadingIndicator = styled.div`
+  text-align: center;
+  padding: 20px;
+  color: #fff;
+`;
+
 const PageContainer = styled.div`
-  margin-bottom: 30px;
+  padding: 20px;
+  background-color: #141414;
+  color: #fff;
+  min-height: 100vh;
 `;
 
 const PageHeader = styled.div`
@@ -61,638 +79,637 @@ const PageHeader = styled.div`
 
 const PageTitle = styled.h1`
   margin: 0;
-  color: white;
   font-size: 24px;
-`;
-
-const ActionButton = styled(AntButton)`
-  background-color: #F0B90B;
-  color: #000000;
-  border: none;
-  border-radius: 4px;
-  padding: 8px 16px;
-  font-weight: bold;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  
-  &:hover {
-    background-color: #d6a50a;
-  }
+  color: #fff;
 `;
 
 const ContentLayout = styled.div`
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: 300px 1fr;
   gap: 20px;
-  height: calc(100vh - 200px);
 `;
 
 const NodeList = styled.div`
-  background-color: #2A2A2A;
-  border-radius: 5px;
-  overflow: hidden;
-  height: 100%;
+  border: 1px solid #303030;
+  border-radius: 4px;
+  background-color: #1f1f1f;
 `;
 
 const NodeListHeader = styled.div`
-  padding: 15px;
-  border-bottom: 1px solid #3A3A3A;
-  font-size: 16px;
+  padding: 16px;
   font-weight: bold;
-  color: white;
+  border-bottom: 1px solid #303030;
+  color: #fff;
+`;
+
+const NodeListContent = styled.div`
+  max-height: calc(100vh - 200px);
+  overflow-y: auto;
+`;
+
+const NodeItem = styled.div<{ selected?: boolean }>`
+  padding: 12px 16px;
+  cursor: pointer;
+  background-color: ${props => props.selected ? '#177ddc' : 'transparent'};
+  border-bottom: 1px solid #303030;
+  color: #fff;
+  &:hover {
+    background-color: ${props => props.selected ? '#177ddc' : '#303030'};
+  }
+`;
+
+const NodeName = styled.div`
   display: flex;
   justify-content: space-between;
   align-items: center;
 `;
 
-const NodeItem = styled.div<{ selected: boolean }>`
-  padding: 12px 15px;
-  border-bottom: 1px solid #3A3A3A;
-  cursor: pointer;
-  background-color: ${props => props.selected ? '#3A3A3A' : 'transparent'};
-  
-  &:hover {
-    background-color: ${props => props.selected ? '#3A3A3A' : '#2F2F2F'};
-  }
-`;
-
-const NodeName = styled.div<{ selected?: boolean }>`
-  font-weight: ${props => props.selected ? 'bold' : 'normal'};
-`;
-
-const NodeInfo = styled.div`
+const StatusIndicator = styled.span<{ active?: boolean }>`
   font-size: 12px;
-  color: #AAAAAA;
-  margin-top: 4px;
-`;
-
-const StatusIndicator = styled.div<{ active?: boolean }>`
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 8px;
-  border-radius: 3px;
-  font-size: 12px;
-  min-width: 60px;
-  text-align: center;
-  white-space: nowrap;
-  background-color: ${props => props.active ? 'rgba(0, 255, 0, 0.2)' : 'rgba(255, 0, 0, 0.2)'};
-  color: ${props => props.active ? '#00FF00' : '#FF0000'};
-  
-  &::before {
-    content: '';
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background-color: ${props => props.active ? '#00AA00' : '#AA0000'};
-    margin-right: 6px;
-  }
+  padding: 2px 8px;
+  border-radius: 10px;
+  background-color: ${props => props.active ? '#49aa19' : '#595959'};
+  color: white;
 `;
 
 const ConfigPanel = styled.div`
-  background-color: #2A2A2A;
-  border-radius: 5px;
   padding: 20px;
-  height: 100%;
-  overflow: auto;
+  border: 1px solid #303030;
+  border-radius: 4px;
+  background-color: #1f1f1f;
 `;
 
 const FormSection = styled.div`
-  margin-bottom: 20px;
+  margin-bottom: 24px;
 `;
 
 const SectionTitle = styled.h2`
-  color: #F0B90B;
   font-size: 18px;
-  margin-top: 0;
-  margin-bottom: 15px;
-  border-bottom: 1px solid #444444;
-  padding-bottom: 8px;
+  margin-bottom: 16px;
+  color: #fff;
 `;
 
 const FormRow = styled.div`
   display: flex;
-  margin-bottom: 15px;
-  gap: 15px;
+  gap: 16px;
+  margin-bottom: 16px;
 `;
 
-const FormGroup = styled.div<{ flex?: number; minWidth?: string }>`
+const FormGroup = styled.div<{ flex?: number }>`
   flex: ${props => props.flex || 1};
-  min-width: ${props => props.minWidth || 'auto'};
 `;
 
 const Label = styled.label`
   display: block;
   margin-bottom: 8px;
-  color: #FFFFFF;
-  font-size: 14px;
-`;
-
-const Input = styled(AntInput)`
-  width: 100%;
-  padding: 8px 12px;
-  border: 1px solid #444444;
-  border-radius: 4px;
-  background-color: #2A2A2A;
-  color: #FFFFFF;
-  font-size: 14px;
-  
-  &:focus {
-    outline: none;
-    border-color: #F0B90B;
+  color: #fff;
+  .required {
+    color: #ff4d4f;
+    margin-left: 4px;
   }
-`;
-
-const Textarea = styled.textarea`
-  width: 100%;
-  padding: 8px 12px;
-  border: 1px solid #444444;
-  border-radius: 4px;
-  background-color: #2A2A2A;
-  color: #FFFFFF;
-  font-size: 14px;
-  min-height: 80px;
-  
-  &:focus {
-    outline: none;
-    border-color: #F0B90B;
-  }
-`;
-
-const Select = styled(AntSelect)<SelectProps<string>>`
-  width: 100%;
-  background-color: #333333;
-  border: 1px solid #444444;
-  border-radius: 4px;
-  color: #FFFFFF;
-  font-size: 14px;
-  
-  &:focus {
-    border-color: #F0B90B;
-    outline: none;
-  }
-`;
-
-const Checkbox = styled.input`
-  margin-right: 8px;
-`;
-
-const CheckboxLabel = styled.label`
-  display: flex;
-  align-items: center;
-  color: #FFFFFF;
-  font-size: 14px;
-  cursor: pointer;
 `;
 
 const ButtonGroup = styled.div`
   display: flex;
-  gap: 10px;
-  margin-top: 20px;
-`;
-
-const Button = styled(AntButton)`
-  padding: 8px 16px;
-  border: none;
-  border-radius: 4px;
-  font-weight: bold;
-  cursor: pointer;
-  
-  &:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-`;
-
-const PrimaryButton = styled(Button)`
-  background-color: #F0B90B;
-  color: #000000;
-  
-  &:hover:not(:disabled) {
-    background-color: #d6a50a;
-  }
-`;
-
-const SecondaryButton = styled(Button)`
-  background-color: #444444;
-  color: #FFFFFF;
-  
-  &:hover:not(:disabled) {
-    background-color: #555555;
-  }
-`;
-
-const DangerButton = styled(Button)`
-  background-color: #AA0000;
-  color: #FFFFFF;
-  
-  &:hover:not(:disabled) {
-    background-color: #CC0000;
-  }
-`;
-
-const ParameterTable = styled.table`
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 10px;
-`;
-
-const TableHeader = styled.th`
-  text-align: left;
-  padding: 8px;
-  border-bottom: 1px solid #444444;
-  color: #AAAAAA;
-`;
-
-const TableCell = styled.td`
-  padding: 8px;
-  border-bottom: 1px solid #444444;
-`;
-
-const AddButton = styled.button`
-  background-color: #444444;
-  color: #FFFFFF;
-  border: none;
-  border-radius: 4px;
-  padding: 5px 10px;
-  font-size: 13px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-top: 10px;
-  
-  &:hover {
-    background-color: #555555;
-  }
-`;
-
-const RemoveButton = styled.button`
-  background-color: transparent;
-  color: #AA0000;
-  border: none;
-  padding: 4px 8px;
-  cursor: pointer;
-  font-size: 14px;
-  
-  &:hover {
-    text-decoration: underline;
-  }
-`;
-
-const TestResultPanel = styled.div`
-  margin-top: 20px;
-  background-color: #222222;
-  border-radius: 4px;
-  padding: 15px;
-`;
-
-const TestResultTitle = styled.div`
-  font-weight: bold;
-  margin-bottom: 10px;
-  color: white;
-`;
-
-const ResultItem = styled.div`
-  display: flex;
-  justify-content: space-between;
-  padding: 5px 0;
-  border-bottom: 1px solid #333333;
-  
-  &:last-child {
-    border-bottom: none;
-  }
-`;
-
-const ResultKey = styled.span`
-  color: #AAAAAA;
-`;
-
-const ResultValue = styled.span`
-  color: #F0B90B;
-  font-family: monospace;
+  gap: 8px;
+  margin-top: 24px;
 `;
 
 const EmptyState = styled.div`
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  color: #777777;
   text-align: center;
-  padding: 20px;
+  color: #888;
+  padding: 40px;
 `;
 
-const EmptyStateTitle = styled.div`
-  font-size: 18px;
-  margin-bottom: 10px;
-`;
-
-const EmptyStateDescription = styled.div`
-  font-size: 14px;
-  margin-bottom: 20px;
-  max-width: 400px;
-`;
-
-const ErrorMessage = styled.div`
-  color: #FF4444;
-  font-size: 13px;
-  margin-top: 5px;
-`;
-
-const SuccessMessage = styled.div`
-  color: #00FF00;
-  font-size: 13px;
-  margin-top: 5px;
-`;
-
-const Card = styled(AntCard)`
-  background-color: #2A2A2A;
-  border-radius: 5px;
-  padding: 20px;
+const LogPanel = styled.div`
   margin-top: 20px;
+  padding: 16px;
+  border: 1px solid #303030;
+  border-radius: 4px;
+  background-color: #1f1f1f;
 `;
 
-const Text = styled.p`
-  color: white;
+const LogMessage = styled.div<{ type: 'success' | 'error' | 'info' }>`
+  margin-bottom: 8px;
+  color: ${props => {
+    switch (props.type) {
+      case 'success': return '#49aa19';
+      case 'error': return '#ff4d4f';
+      default: return '#888';
+    }
+  }};
 `;
 
-interface LogMessage {
-  timestamp: string;
-  message: string;
-  type: 'info' | 'error' | 'success';
-}
+const InfoRow = styled.div`
+  margin-bottom: 12px;
+  color: #fff;
+`;
 
-interface SupabaseDataCollectionConfig {
-  id?: string;
-  name: string;
-  config: Record<string, any>;
-  type: 'contract' | 'api' | 'websocket';
-  active: boolean;
-}
+const InfoLabel = styled.span`
+  font-weight: bold;
+  margin-right: 8px;
+  color: #fff;
+`;
+
+const InfoValue = styled.span`
+  color: #fff;
+`;
 
 const DataProcessingConfig: React.FC = () => {
+  const navigate = useNavigate();
+  const location = useLocation();
   const [nodes, setNodes] = useState<DataProcessingConfigModel[]>([]);
-  const [currentNode, setCurrentNode] = useState<DataProcessingConfigModel>(emptyNode);
-  const [selectedNode, setSelectedNode] = useState<DataCollectionNode | null>(null);
-  const [dataCollectionNodes, setDataCollectionNodes] = useState<DataCollectionNode[]>([]);
+  const [dataCollectionNodes, setDataCollectionNodes] = useState<ExtendedDataCollectionNode[]>([]);
+  const [currentNode, setCurrentNode] = useState<DataProcessingConfigModel>({
+    id: '',
+    name: '',
+    source_node_id: '',
+    input_params: [],
+    output_params: [],
+    formulas: [],
+    active: true,
+    created_at: '',
+    updated_at: ''
+  });
   const [isEditing, setIsEditing] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [logs, setLogs] = useState<LogMessage[]>([]);
+  const [logs, setLogs] = useState<Log[]>([]);
 
-  // 获取所有数据处理节点
-  const fetchProcessingNodes = async () => {
-    try {
-      addLog('正在获取数据处理节点列表...');
-      const { data: rawData, error } = await supabase
-        .from('data_processing_configs')
-        .select('*')
-        .eq('is_enabled', true);
-
-      if (error) throw error;
-      if (!rawData) {
-        addLog('未获取到数据处理节点', 'error');
-        return;
-      }
-
-      const validNodes = rawData as DataProcessingConfigModel[];
-      setNodes(validNodes);
-      addLog(`成功获取 ${validNodes.length} 个数据处理节点`, 'success');
-    } catch (error) {
-      addLog(`获取数据处理节点失败: ${error instanceof Error ? error.message : String(error)}`, 'error');
-      message.error('获取数据处理节点失败');
-    }
+  // 事件处理函数
+  const handleNodeSelect = (node: DataProcessingConfigModel) => {
+    setCurrentNode(node);
+    setIsEditing(false);
   };
 
-  // 初始化加载
-  useEffect(() => {
-    fetchProcessingNodes();
-  }, []);
-
-  // 获取数据采集节点列表
-  useEffect(() => {
-    const fetchDataCollectionNodes = async () => {
-      try {
-        addLog('正在获取数据采集节点列表...');
-        const { data: rawData, error } = await supabase
-          .from('data_collection_configs')
-          .select('id, name, config, type, active')
-          .eq('is_enabled', true);
-
-        if (error) throw error;
-        if (!rawData) {
-          addLog('未获取到数据采集节点', 'error');
-          return;
-        }
-
-        const data = rawData as SupabaseDataCollectionConfig[];
-        const mappedNodes: DataCollectionNode[] = data.map(item => ({
-          id: item.id || '',
-          name: item.name,
-          config: item.config,
-          type: item.type,
-          active: item.active,
-          key: item.id || '',
-          title: item.name,
-          value: item.id || ''
-        }));
-
-        setDataCollectionNodes(mappedNodes);
-        addLog(`成功获取 ${mappedNodes.length} 个数据采集节点`, 'success');
-      } catch (error) {
-        addLog(`获取数据采集节点失败: ${error instanceof Error ? error.message : String(error)}`, 'error');
-        message.error('获取数据采集节点失败');
-      }
-    };
-
-    fetchDataCollectionNodes();
-  }, []);
-
-  // 处理节点选择
-  const handleNodeSelect = (node: DataCollectionNode) => {
-    setSelectedNode(node);
-    const newNode: DataProcessingConfigModel = {
-      ...emptyNode,
-      source_node_id: node.id || ''
-    };
-    setCurrentNode(newNode);
-  };
-
-  // 保存节点
-  const handleSaveNode = async () => {
-    try {
-      setIsLoading(true);
-      addLog('正在保存节点...');
-
-      if (!currentNode.name.trim()) {
-        throw new Error('节点名称不能为空');
-      }
-
-      if (!currentNode.source_node_id) {
-        throw new Error('请选择数据采集节点');
-      }
-
-      if (currentNode.id) {
-        // 更新现有节点
-        const { error } = await supabase
-          .from('data_processing_configs')
-          .update(currentNode)
-          .eq('id', currentNode.id);
-
-        if (error) throw error;
-
-        setNodes(prev => prev.map(node => 
-          node.id === currentNode.id ? currentNode : node
-        ));
-        addLog('节点更新成功', 'success');
-      } else {
-        // 创建新节点
-        const { data, error } = await supabase
-          .from('data_processing_configs')
-          .insert([currentNode])
-          .select()
-          .single();
-
-        if (error) throw error;
-        if (!data) throw new Error('创建节点失败');
-
-        const newNode = data as DataProcessingConfigModel;
-        setNodes(prev => [...prev, newNode]);
-        setCurrentNode(newNode);
-        addLog('节点创建成功', 'success');
-      }
-
-      setIsEditing(false);
-    } catch (error) {
-      addLog(`保存节点失败: ${error instanceof Error ? error.message : String(error)}`, 'error');
-      message.error('保存节点失败');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // 删除节点
-  const handleDeleteNode = async () => {
-    if (!currentNode.id || !window.confirm('确定要删除此节点吗？此操作不可恢复。')) {
-      return;
-    }
-
-    try {
-      setIsLoading(true);
-      addLog('正在删除节点...');
-
-      const { error } = await supabase
-        .from('data_processing_configs')
-        .delete()
-        .eq('id', currentNode.id);
-
-      if (error) throw error;
-
-      setNodes(prev => prev.filter(node => node.id !== currentNode.id));
-      setCurrentNode(emptyNode);
-      setSelectedNode(null);
-      setIsEditing(false);
-      addLog('节点删除成功', 'success');
-    } catch (error) {
-      addLog(`删除节点失败: ${error instanceof Error ? error.message : String(error)}`, 'error');
-      message.error('删除节点失败');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // 添加规则
-  const handleAddRule = () => {
-    const newRule: ProcessingRule = {
-      ...emptyRule,
-      id: `rule-${Date.now()}`
-    };
+  const handleSourceNodeChange: SelectProps['onChange'] = (value) => {
     setCurrentNode(prev => ({
       ...prev,
-      rules: [...prev.rules, newRule]
+      source_node_id: value as string
     }));
   };
 
-  // 添加输出参数
+  const handleStatusChange: SelectProps['onChange'] = (value) => {
+    setCurrentNode(prev => ({
+      ...prev,
+      active: value === 'true'
+    }));
+  };
+
+  const handleInputParamUpdate = (index: number, updates: Partial<InputParamType>) => {
+    setCurrentNode(prev => {
+      const newInputParams = [...prev.input_params];
+      const updatedParam = { ...newInputParams[index], ...updates } as InputParamType;
+      newInputParams[index] = updatedParam;
+      return { ...prev, input_params: newInputParams };
+    });
+  };
+
+  const handleOutputParamUpdate = (index: number, updates: Partial<OutputParamType>) => {
+    setCurrentNode(prev => {
+      const newOutputParams = [...prev.output_params];
+      const updatedParam = { ...newOutputParams[index], ...updates } as OutputParamType;
+      newOutputParams[index] = updatedParam;
+      return { ...prev, output_params: newOutputParams };
+    });
+  };
+
+  const handleFormulaUpdate = (index: number, updates: Partial<FormulaType>) => {
+    setCurrentNode(prev => {
+      const newFormulas = [...prev.formulas];
+      const updatedFormula = { ...newFormulas[index], ...updates } as FormulaType;
+      newFormulas[index] = updatedFormula;
+      return { ...prev, formulas: newFormulas };
+    });
+  };
+
+  const handleAddInputParam = () => {
+    setCurrentNode(prev => ({
+      ...prev,
+      input_params: [...prev.input_params, { name: '', type: 'string', value: '' }]
+    }));
+  };
+
   const handleAddOutputParam = () => {
-    const newParam: OutputParam = {
-      ...emptyOutputParam,
-      customName: `param-${Date.now()}`
-    };
     setCurrentNode(prev => ({
       ...prev,
-      output_params: [...prev.output_params, newParam]
+      output_params: [...prev.output_params, { name: '', type: 'string', value: '' }]
     }));
   };
 
-  // 处理规则更新
-  const handleRuleUpdate = (index: number, updates: Partial<ProcessingRule>) => {
-    setCurrentNode(prev => {
-      const updatedRules = [...prev.rules];
-      updatedRules[index] = {
-        ...updatedRules[index],
-        ...updates
-      };
-      return {
-        ...prev,
-        rules: updatedRules
-      };
-    });
-  };
-
-  // 处理输出参数更新
-  const handleOutputParamUpdate = (index: number, updates: Partial<OutputParam>) => {
-    setCurrentNode(prev => {
-      const updatedParams = [...prev.output_params];
-      updatedParams[index] = {
-        ...updatedParams[index],
-        ...updates
-      };
-      return {
-        ...prev,
-        output_params: updatedParams
-      };
-    });
-  };
-
-  // 删除规则
-  const handleRemoveRule = (index: number) => {
+  const handleAddFormula = () => {
     setCurrentNode(prev => ({
       ...prev,
-      rules: prev.rules.filter((_, i) => i !== index)
+      formulas: [...prev.formulas, { name: '', formula: '', description: '' }]
     }));
   };
 
-  // 删除输出参数
+  const handleRemoveInputParam = (index: number) => {
+    setCurrentNode(prev => ({
+      ...prev,
+      input_params: prev.input_params.filter((_, i: number) => i !== index)
+    }));
+  };
+
   const handleRemoveOutputParam = (index: number) => {
     setCurrentNode(prev => ({
       ...prev,
-      output_params: prev.output_params.filter((_, i) => i !== index)
+      output_params: prev.output_params.filter((_, i: number) => i !== index)
     }));
   };
 
-  // 添加日志的辅助函数
-  const addLog = (message: string, type: 'info' | 'error' | 'success' = 'info') => {
-    setLogs(prev => [...prev, {
-      timestamp: new Date().toLocaleTimeString(),
-      message,
-      type
-    }]);
+  const handleRemoveFormula = (index: number) => {
+    setCurrentNode(prev => ({
+      ...prev,
+      formulas: prev.formulas.filter((_, i: number) => i !== index)
+    }));
   };
 
+  const handleSaveNode = async () => {
+    if (!currentNode.name) {
+      setLogs(prev => [{
+        type: 'error',
+        message: '请输入节点名称',
+        timestamp: new Date().toLocaleString()
+      }, ...prev]);
+      return;
+    }
+
+    if (!currentNode.source_node_id) {
+      setLogs(prev => [{
+        type: 'error',
+        message: '请选择数据源节点',
+        timestamp: new Date().toLocaleString()
+      }, ...prev]);
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const nodeToSave: RawDataProcessingConfig = {
+        ...currentNode,
+        input_params: JSON.stringify(currentNode.input_params),
+        output_params: JSON.stringify(currentNode.output_params),
+        formulas: JSON.stringify(currentNode.formulas)
+      };
+
+      let result;
+      if (currentNode.id) {
+        // 更新现有节点
+        result = await supabase
+          .from('data_processing_nodes')
+          .update(nodeToSave)
+          .eq('id', currentNode.id)
+          .select()
+          .single();
+      } else {
+        // 创建新节点
+        result = await supabase
+          .from('data_processing_nodes')
+          .insert(nodeToSave)
+          .select()
+          .single();
+      }
+
+      if (result.error) {
+        throw result.error;
+      }
+
+      const rawData = result.data as RawDataProcessingConfig;
+      const savedNode: DataProcessingConfigModel = {
+        ...rawData,
+        input_params: JSON.parse(rawData.input_params || '[]'),
+        output_params: JSON.parse(rawData.output_params || '[]'),
+        formulas: JSON.parse(rawData.formulas || '[]')
+      };
+
+      setNodes(prev => {
+        const index = prev.findIndex(n => n.id === savedNode.id);
+        if (index >= 0) {
+          return prev.map(n => n.id === savedNode.id ? savedNode : n);
+        }
+        return [...prev, savedNode];
+      });
+
+      setCurrentNode(savedNode);
+      setIsEditing(false);
+      setLogs(prev => [{
+        type: 'success',
+        message: `节点${currentNode.id ? '更新' : '创建'}成功`,
+        timestamp: new Date().toLocaleString()
+      }, ...prev]);
+    } catch (error: any) {
+      console.error('保存节点失败:', error);
+      setLogs(prev => [{
+        type: 'error',
+        message: `节点${currentNode.id ? '更新' : '创建'}失败: ${error.message}`,
+        timestamp: new Date().toLocaleString()
+      }, ...prev]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleDeleteNode = async () => {
+    if (!currentNode.id) return;
+
+    if (!window.confirm('确定要删除此节点吗？此操作不可恢复。')) {
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const { error } = await supabase
+        .from('data_processing_nodes')
+        .delete()
+        .eq('id', currentNode.id);
+
+      if (error) {
+        throw error;
+      }
+
+      setNodes(prev => prev.filter(n => n.id !== currentNode.id));
+      setCurrentNode({
+        id: '',
+        name: '',
+        source_node_id: '',
+        input_params: [],
+        output_params: [],
+        formulas: [],
+        active: true,
+        created_at: '',
+        updated_at: ''
+      });
+      setIsEditing(false);
+      setLogs(prev => [{
+        type: 'success',
+        message: '节点删除成功',
+        timestamp: new Date().toLocaleString()
+      }, ...prev]);
+    } catch (error: any) {
+      console.error('删除节点失败:', error);
+      setLogs(prev => [{
+        type: 'error',
+        message: `删除节点失败: ${error.message}`,
+        timestamp: new Date().toLocaleString()
+      }, ...prev]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // 加载数据
+  useEffect(() => {
+    const fetchNodes = async () => {
+      setIsLoading(true);
+      try {
+        // 检查 Supabase 配置
+        if (!supabaseUrl || !supabaseKey) {
+          throw new Error('请先配置 Supabase 环境变量');
+        }
+
+        // 尝试获取数据处理节点
+        const { data: processingNodes, error: processingError } = await supabase
+          .from('data_processing_nodes')
+          .select('*');
+
+        if (processingError) {
+          throw processingError;
+        }
+
+        // 设置空数组作为默认值
+        const parsedNodes = (processingNodes || []).map((node: any) => ({
+          ...node,
+          input_params: JSON.parse(node.input_params || '[]'),
+          output_params: JSON.parse(node.output_params || '[]'),
+          formulas: JSON.parse(node.formulas || '[]')
+        }));
+
+        setNodes(parsedNodes);
+
+        // 尝试获取数据采集节点
+        const { data: collectionNodes, error: collectionError } = await supabase
+          .from('data_collection_nodes')
+          .select('*');
+
+        if (collectionError) {
+          throw collectionError;
+        }
+
+        // 设置空数组作为默认值
+        const extendedCollectionNodes: ExtendedDataCollectionNode[] = (collectionNodes || []).map((node: any) => ({
+          ...node,
+          key: node.id,
+          title: node.name,
+          value: node.id,
+          type: node.type || 'api',
+          config: node.config || {},
+          is_enabled: true
+        }));
+
+        setDataCollectionNodes(extendedCollectionNodes);
+      } catch (error: any) {
+        console.error('加载数据失败:', error);
+        setLogs(prev => [{
+          type: 'error',
+          message: `加载数据失败: ${error.message}`,
+          timestamp: new Date().toLocaleString()
+        }, ...prev]);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchNodes();
+  }, []);
+
+  // 添加导航菜单项
+  const menuItems = [
+    {
+      key: '/capability/data-collection',
+      label: '数据采集能力',
+    },
+    {
+      key: '/capability/data-processing',
+      label: '数据加工能力',
+    },
+  ];
+
   return (
+    <ConfigProvider
+      theme={{
+        algorithm: theme.darkAlgorithm,
+        token: {
+          colorBgContainer: '#1f1f1f',
+          colorBorder: '#303030',
+          colorText: '#fff',
+          colorTextSecondary: '#888',
+        },
+      }}
+    >
+      <Layout style={{ minHeight: '100vh', background: '#141414' }}>
+        <Sider width={200} theme="dark">
+          <Menu
+            mode="inline"
+            selectedKeys={[location.pathname]}
+            items={menuItems}
+            onClick={({ key }) => navigate(key)}
+            style={{ height: '100%', borderRight: 0 }}
+            theme="dark"
+          />
+        </Sider>
+        <Layout style={{ background: '#141414' }}>
+          <Content style={{ padding: '24px', minHeight: 280 }}>
     <PageContainer>
-      <PageHeader>
-        <PageTitle>数据加工能力</PageTitle>
-        <ActionButton onClick={() => setIsEditing(true)}>
-          添加新节点
-        </ActionButton>
-      </PageHeader>
-      {/* ... rest of the JSX ... */}
+              <PageHeader>
+                <PageTitle>数据加工能力</PageTitle>
+                <Button type="primary" onClick={() => setIsEditing(true)}>
+                  添加新节点
+                </Button>
+              </PageHeader>
+
+              {isLoading && <LoadingIndicator>加载中...</LoadingIndicator>}
+
+              <ContentLayout>
+                <NodeList>
+                  <NodeListHeader>节点列表</NodeListHeader>
+                  <NodeListContent>
+                    {nodes.map(node => (
+                      <NodeItem 
+                        key={node.id} 
+                        selected={currentNode?.id === node.id}
+                        onClick={() => handleNodeSelect(node)}
+                      >
+                        <NodeName>
+                          {node.name}
+                          <StatusIndicator active={node.active}>
+                            {node.active ? '已启用' : '已禁用'}
+                          </StatusIndicator>
+                        </NodeName>
+                      </NodeItem>
+                    ))}
+                  </NodeListContent>
+                </NodeList>
+
+                <ConfigPanel>
+                  {isEditing ? (
+                    <>
+                      <FormSection>
+                        <SectionTitle>基本信息</SectionTitle>
+                        <FormRow>
+                          <FormGroup>
+                            <Label>节点名称<span className="required">*</span></Label>
+                            <Input 
+                              value={currentNode.name} 
+                              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCurrentNode(prev => ({
+                                ...prev,
+                                name: e.target.value
+                              }))}
+                              placeholder="请输入节点名称"
+                            />
+                          </FormGroup>
+                        </FormRow>
+
+                        <FormRow>
+                          <FormGroup>
+                            <Label>数据源节点<span className="required">*</span></Label>
+                            <Select 
+                              value={currentNode.source_node_id}
+                              onChange={handleSourceNodeChange}
+                            >
+                              <Select.Option value="">请选择数据源节点</Select.Option>
+                              {dataCollectionNodes.map((node: ExtendedDataCollectionNode) => (
+                                <Select.Option key={node.id} value={node.id}>
+                                  {node.name}
+                                </Select.Option>
+                              ))}
+                            </Select>
+                          </FormGroup>
+                        </FormRow>
+
+                        <FormRow>
+                          <FormGroup>
+                            <Label>状态</Label>
+                            <Select 
+                              value={currentNode.active ? 'true' : 'false'}
+                              onChange={handleStatusChange}
+                            >
+                              <Select.Option value="true">启用</Select.Option>
+                              <Select.Option value="false">禁用</Select.Option>
+                            </Select>
+                          </FormGroup>
+                        </FormRow>
+                      </FormSection>
+
+                      <ButtonGroup>
+                        <Button type="primary" onClick={handleSaveNode}>
+                          保存
+                        </Button>
+                        <Button onClick={() => setIsEditing(false)}>
+                          取消
+                        </Button>
+                        {currentNode.id && (
+                          <Button danger onClick={handleDeleteNode}>
+                            删除
+                          </Button>
+                        )}
+                      </ButtonGroup>
+                    </>
+                  ) : currentNode.id ? (
+                    <>
+                      <FormSection>
+                        <SectionTitle>基本信息</SectionTitle>
+                        <InfoRow>
+                          <InfoLabel>节点名称:</InfoLabel>
+                          <InfoValue>{currentNode.name}</InfoValue>
+                        </InfoRow>
+                        <InfoRow>
+                          <InfoLabel>数据源节点:</InfoLabel>
+                          <InfoValue>
+                            {dataCollectionNodes.find((node: ExtendedDataCollectionNode) => node.id === currentNode.source_node_id)?.name || '未知'}
+                          </InfoValue>
+                        </InfoRow>
+                        <InfoRow>
+                          <InfoLabel>状态:</InfoLabel>
+                          <InfoValue>
+                            <StatusIndicator active={currentNode.active}>
+                              {currentNode.active ? '已启用' : '已禁用'}
+                            </StatusIndicator>
+                          </InfoValue>
+                        </InfoRow>
+                      </FormSection>
+
+                      <ButtonGroup>
+                        <Button type="primary" onClick={() => setIsEditing(true)}>
+                          编辑
+                        </Button>
+                        <Button danger onClick={handleDeleteNode}>
+                          删除
+                        </Button>
+                      </ButtonGroup>
+                    </>
+                  ) : (
+                    <EmptyState>
+                      请选择一个节点或点击"添加新节点"按钮创建新节点
+                    </EmptyState>
+                  )}
+                </ConfigPanel>
+              </ContentLayout>
+
+              {logs.length > 0 && (
+                <LogPanel>
+                  <SectionTitle>操作日志</SectionTitle>
+                  {logs.map((log, index) => (
+                    <LogMessage key={index} type={log.type}>
+                      [{log.timestamp}] {log.message}
+                    </LogMessage>
+                  ))}
+                </LogPanel>
+              )}
     </PageContainer>
+          </Content>
+        </Layout>
+      </Layout>
+    </ConfigProvider>
   );
 };
 
